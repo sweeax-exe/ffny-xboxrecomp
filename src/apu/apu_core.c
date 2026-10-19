@@ -374,6 +374,10 @@ void mcpx_apu_monitor_frame(MCPXAPUState *d)
             extern int g_apu_route_on;
             level = getenv("RECOMP_APU_LEVEL") != NULL;
             g_apu_route_on = level;
+            /* RECOMP_AUDIO_MUTE=1: run the audio at its pace but play silence (a second
+             * copy of the game on the same PC). */
+            if (getenv("RECOMP_AUDIO_MUTE") && *getenv("RECOMP_AUDIO_MUTE") == '1')
+                g_audio_muted = 1;
         }
         if (g_audio_muted)
             memset(d->monitor.frame_buf, 0, sizeof(d->monitor.frame_buf));

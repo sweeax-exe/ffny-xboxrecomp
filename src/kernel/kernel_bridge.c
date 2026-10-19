@@ -505,10 +505,16 @@ void xbox_PinToGuestCore(void)
 
     if (InterlockedCompareExchange(&init, 1, 0) == 0) {
         const char *s = getenv("RECOMP_GUEST_CORES");
+        /* RECOMP_GUEST_CORE=<n>: another logical CPU than 2, for a second copy of the
+         * game on the same PC (a local online test), which would otherwise share it. */
+        const char *one = getenv("RECOMP_GUEST_CORE");
+        int want = one && *one ? atoi(one) : 2;
         DWORD_PTR proc = 0, sys = 0;
+        if (want < 0 || want >= (int)(sizeof(DWORD_PTR) * 8)) want = 2;
         if (!(s && !strcmp(s, "all"))
                 && GetProcessAffinityMask(GetCurrentProcess(), &proc, &sys) && proc) {
-            mask = (proc & ((DWORD_PTR)1 << 2)) ? ((DWORD_PTR)1 << 2)
+            mask = (proc & ((DWORD_PTR)1 << want)) ? ((DWORD_PTR)1 << want)
+                 : (proc & ((DWORD_PTR)1 << 2)) ? ((DWORD_PTR)1 << 2)
                                                 : (proc & (~proc + 1));   /* lowest */
             fprintf(stderr, "  [KERNEL] guest threads share host CPU mask 0x%llX"
                             " (RECOMP_GUEST_CORES=all to spread them)\n",

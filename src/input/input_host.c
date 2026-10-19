@@ -907,13 +907,40 @@ void xbox_HostInputFocus(int focused)
     if (!focused) memset(H.key, 0, sizeof(H.key));
 }
 
+/* Every device on this PC is the one local player: pads in whatever slot they took (one
+ * switched on after the game started lands after the keyboard) and the keyboard. Buttons
+ * are combined, analog buttons take the strongest, each stick the one pushed furthest. */
 DWORD xbox_HostInputGetLocalState(XBOX_INPUT_STATE *state)
 {
-    int present;
+    int s, present = 0;
+    DWORD packet = 0;
     if (!H.running || !state) return ERROR_DEVICE_NOT_CONNECTED;
+    memset(state, 0, sizeof(*state));
     EnterCriticalSection(&H.cs);
-    present = H.slot[0].device >= 0 || H.kb_slot == 0 || H.kb_merge;
-    if (present) to_state(&H.out[0], state, H.packet[0]);
+    for (s = 0; s < SLOTS; s++) {
+        XBOX_INPUT_STATE one;
+        int i;
+        if (!(H.slot[s].device >= 0 || s == H.kb_slot || (H.kb_merge && s == 0)))
+            continue;
+        to_state(&H.out[s], &one, H.packet[s]);
+        present = 1;
+        packet += H.packet[s];
+        state->Gamepad.wButtons |= one.Gamepad.wButtons;
+        for (i = 0; i < 8; i++)
+            if (one.Gamepad.bAnalogButtons[i] > state->Gamepad.bAnalogButtons[i])
+                state->Gamepad.bAnalogButtons[i] = one.Gamepad.bAnalogButtons[i];
+        if (abs(one.Gamepad.sThumbLX) + abs(one.Gamepad.sThumbLY) >
+            abs(state->Gamepad.sThumbLX) + abs(state->Gamepad.sThumbLY)) {
+            state->Gamepad.sThumbLX = one.Gamepad.sThumbLX;
+            state->Gamepad.sThumbLY = one.Gamepad.sThumbLY;
+        }
+        if (abs(one.Gamepad.sThumbRX) + abs(one.Gamepad.sThumbRY) >
+            abs(state->Gamepad.sThumbRX) + abs(state->Gamepad.sThumbRY)) {
+            state->Gamepad.sThumbRX = one.Gamepad.sThumbRX;
+            state->Gamepad.sThumbRY = one.Gamepad.sThumbRY;
+        }
+    }
+    state->dwPacketNumber = packet;
     LeaveCriticalSection(&H.cs);
     return present ? ERROR_SUCCESS : ERROR_DEVICE_NOT_CONNECTED;
 }

@@ -510,12 +510,39 @@ void mcpx_apu_monitor_frame(MCPXAPUState *d)
 
 static void throttle(MCPXAPUState *d)
 {
-    if (d->ep_frame_div % 8) {
+    /* Frames run between waits. The voice processor on the console takes 32
+     * samples at a time; this thread used to run a whole 256-sample period
+     * back to back and then sleep, so a voice's position jumped 5.3 ms at once
+     * and a title refilling a ring just ahead of it had that much less slack
+     * than on hardware (Def Jam's music ring: docs/research/music-ring-mixer.md).
+     * Two frames, 1.3 ms, is as fine as a one-millisecond timer paces well;
+     * stale ring reads fell from 74 to 7 a minute. RECOMP_APU_STEP_FRAMES=1, 4
+     * or 8 chooses another step. */
+    static int step = 0;
+    if (!step) {
+        const char *e = getenv("RECOMP_APU_STEP_FRAMES");
+        step = e ? atoi(e) : 2;
+        if (step != 1 && step != 2 && step != 4 && step != 8)
+            step = 2;
+    }
+    if (d->ep_frame_div % step) {
         return;
     }
 
     int64_t now_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
 
+    {
+        /* RECOMP_SLEEP_TRACE=1: every time the frame thread finds itself more
+         * than a period behind (it then runs periods back to back), with the
+         * same clock the [RING] lines use. */
+        static int trace = -1;
+        static unsigned lines;
+        if (trace < 0)
+            trace = getenv("RECOMP_SLEEP_TRACE") != NULL;
+        if (trace && d->next_frame_time_us && now_us - d->next_frame_time_us > EP_FRAME_US && lines++ < 3000)
+            fprintf(stderr, "[APU-LATE] %.1f ms behind at %lld ms\n",
+                    (now_us - d->next_frame_time_us) / 1000.0, (long long)(now_us / 1000));
+    }
     /* Up to four periods late is made up, which covers the front-end traps
      * the frame thread waits out; later than that and the clock starts again. */
     if (d->next_frame_time_us == 0 ||
@@ -532,7 +559,34 @@ static void throttle(MCPXAPUState *d)
             break;
         }
     }
-    d->next_frame_time_us += EP_FRAME_US;
+    {
+        /* A period is 256 samples, 5333 1/3 us. Adding a whole 5333 ran the
+         * clock 62 ppm fast and the queue filled until a buffer was thrown
+         * away, about every five minutes; every third period gets the third.
+         *
+         * The host clock and the audio device's crystal also disagree by tens
+         * of ppm, so the period then follows the device: a little longer while
+         * more than three buffers wait, a little shorter while fewer than two
+         * do. 40 us is 0.75%, too small for the title to notice and enough to
+         * win against any crystal. Without a device the clock runs free. */
+        static int free_clock = -1;
+        static double carry;
+        int queued, buf = xa2_get_buffer_size();
+        double period = step * (32 * 1000000.0 / 48000) + carry;   /* exact, in us */
+        int64_t whole;
+        if (free_clock < 0)
+            free_clock = getenv("RECOMP_APU_FREE_CLOCK") != NULL;   /* A/B diagnostic */
+        queued = free_clock ? -1 : xa2_queued_samples();
+        if (queued >= 0 && buf > 0) {
+            if (queued > 3 * buf)
+                period += 5.0 * step;
+            else if (queued < 2 * buf)
+                period -= 5.0 * step;
+        }
+        whole = (int64_t)period;
+        carry = period - (double)whole;
+        d->next_frame_time_us += whole;
+    }
     /* A pause request cuts the wait short, and a frame thread kept running by
      * the mixer while paused comes back here at once: the deadline then ran
      * ahead of the clock by a period per pass, and the first frame after the
@@ -594,6 +648,12 @@ int64_t  g_apu_trap_stall_us;
 static void *mcpx_apu_frame_thread(void *arg)
 {
     MCPXAPUState *d = MCPX_APU_DEVICE(arg);
+#if defined(_WIN32)
+    /* This thread is the sound card's clock: when it wakes late the queue
+     * runs dry and the gap is heard. It sleeps most of the time, so running
+     * it above the title's threads costs them nothing. */
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+#endif
     qemu_mutex_lock(&d->lock);
 
     while (!qatomic_read(&d->exiting)) {

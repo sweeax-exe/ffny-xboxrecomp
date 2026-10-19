@@ -21,4 +21,9 @@ int xa2_submit_samples(const int16_t *samples, int num_samples);
 /* Get the preferred buffer size in samples. */
 int xa2_get_buffer_size(void);
 
+/* Samples submitted and not yet played, or -1 when there is no device. The
+ * APU's frame clock follows it so the queue neither drains nor overflows when
+ * the host clock and the audio device's clock disagree. */
+int xa2_queued_samples(void);
+
 #endif /* APU_XAUDIO2_H */

@@ -17,6 +17,7 @@
 
 #define COBJMACROS
 #include <windows.h>
+#include <mmsystem.h>   /* timeBeginPeriod; winmm is linked by src/apu/CMakeLists.txt */
 #include <xaudio2.h>
 
 #pragma comment(lib, "xaudio2.lib")
@@ -25,7 +26,15 @@
 #define XA2_SAMPLE_RATE   48000
 #define XA2_CHANNELS      2
 #define XA2_BUF_SAMPLES   1024   /* ~21ms per submission */
-#define XA2_NUM_BUFS      3
+/* At most XA2_MAX_QUEUED buffers wait in the voice (85 ms); one more slot is
+ * kept so the buffer being written is never one XAudio2 still reads. Playback
+ * starts, and starts again after running out, once XA2_PREROLL are waiting
+ * (43 ms), as the SDL path below does. Started at once, the queue sat at zero
+ * to one buffer and any late wake of the frame thread was a gap with a hard
+ * edge: crackling, heard most in the music. */
+#define XA2_MAX_QUEUED    4
+#define XA2_NUM_BUFS      (XA2_MAX_QUEUED + 1)
+#define XA2_PREROLL       2
 
 static IXAudio2               *g_xa2 = NULL;
 static IXAudio2MasteringVoice *g_xa2_master = NULL;
@@ -34,6 +43,8 @@ static int16_t                 g_xa2_bufs[XA2_NUM_BUFS][XA2_BUF_SAMPLES][2];
 static int                     g_xa2_next_buf = 0;
 static int                     g_xa2_initialized = 0;
 static int                     g_xa2_frames_written = 0;
+static int                     g_xa2_playing = 0;    /* the voice is started */
+static int                     g_xa2_timer_period = 0;
 /* Submissions refused because the queue was full, and submissions that
  * found it empty (the device had run dry: a gap in what is heard). */
 int                            g_xa2_dropped, g_xa2_starved;
@@ -80,18 +91,19 @@ int xa2_init(void)
         goto fail;
     }
 
-    hr = IXAudio2SourceVoice_Start(g_xa2_source, 0, XAUDIO2_COMMIT_NOW);
-    if (FAILED(hr)) {
-        fprintf(stderr, "[XA2] Start failed: 0x%08lX\n", hr);
-        goto fail;
-    }
-
+    /* The voice is started by the submission that completes the preroll. */
+    g_xa2_playing = 0;
     g_xa2_next_buf = 0;
     g_xa2_initialized = 1;
     g_xa2_frames_written = 0;
 
-    fprintf(stderr, "[XA2] XAudio2 initialized (%d Hz stereo 16-bit, %d x %d-sample buffers)\n",
-            XA2_SAMPLE_RATE, XA2_NUM_BUFS, XA2_BUF_SAMPLES);
+    /* The APU frame thread sleeps a few milliseconds at a time; at the default
+     * 15.6 ms timer resolution it wakes late in bursts. */
+    if (!g_xa2_timer_period && timeBeginPeriod(1) == TIMERR_NOERROR)
+        g_xa2_timer_period = 1;
+
+    fprintf(stderr, "[XA2] XAudio2 initialized (%d Hz stereo 16-bit, up to %d x %d-sample buffers,"
+            " %d before playing)\n", XA2_SAMPLE_RATE, XA2_MAX_QUEUED, XA2_BUF_SAMPLES, XA2_PREROLL);
     return 1;
 
 fail:
@@ -118,14 +130,27 @@ void xa2_shutdown(void)
         g_xa2 = NULL;
     }
 
+    if (g_xa2_timer_period) {
+        timeEndPeriod(1);
+        g_xa2_timer_period = 0;
+    }
     if (g_xa2_initialized)
         fprintf(stderr, "[XA2] Shut down (%d frames written)\n", g_xa2_frames_written);
     g_xa2_initialized = 0;
+    g_xa2_playing = 0;
 }
 
 int xa2_is_active(void)
 {
     return g_xa2_initialized;
+}
+
+int xa2_queued_samples(void)
+{
+    XAUDIO2_VOICE_STATE state;
+    if (!g_xa2_initialized || !g_xa2_source || !g_xa2_playing) return -1;
+    IXAudio2SourceVoice_GetState(g_xa2_source, &state, XAUDIO2_VOICE_NOSAMPLESPLAYED);
+    return (int)state.BuffersQueued * XA2_BUF_SAMPLES;
 }
 
 /* Submit a buffer of mixed samples to XAudio2.
@@ -141,9 +166,15 @@ int xa2_submit_samples(const int16_t *samples, int num_samples)
     if (!g_xa2_initialized || !g_xa2_source) return 0;
 
     IXAudio2SourceVoice_GetState(g_xa2_source, &state, XAUDIO2_VOICE_NOSAMPLESPLAYED);
-    if (state.BuffersQueued == 0 && g_xa2_frames_written > 0)
+    if (state.BuffersQueued == 0 && g_xa2_playing) {
+        /* Ran out: one gap. Stop and build the preroll again rather than
+         * play each buffer the moment it arrives, which would keep the queue
+         * at the edge and turn the one gap into a run of them. */
         g_xa2_starved++;
-    if ((int)state.BuffersQueued >= XA2_NUM_BUFS) {
+        IXAudio2SourceVoice_Stop(g_xa2_source, 0, XAUDIO2_COMMIT_NOW);
+        g_xa2_playing = 0;
+    }
+    if ((int)state.BuffersQueued >= XA2_MAX_QUEUED) {
         g_xa2_dropped++;
         return 0;
     }
@@ -161,6 +192,13 @@ int xa2_submit_samples(const int16_t *samples, int num_samples)
 
     g_xa2_next_buf = (idx + 1) % XA2_NUM_BUFS;
     g_xa2_frames_written++;
+    if (!g_xa2_playing && (int)state.BuffersQueued + 1 >= XA2_PREROLL) {
+        hr = IXAudio2SourceVoice_Start(g_xa2_source, 0, XAUDIO2_COMMIT_NOW);
+        if (SUCCEEDED(hr))
+            g_xa2_playing = 1;
+        else
+            fprintf(stderr, "[XA2] Start failed: 0x%08lX\n", hr);
+    }
     return 1;
 }
 
@@ -375,5 +413,21 @@ int xa2_submit_samples(const int16_t *samples, int num_samples)
 }
 
 int xa2_get_buffer_size(void) { return XA2_BUF_SAMPLES; }
+
+int xa2_queued_samples(void)
+{
+    int n;
+    if (!g_xa2_initialized || !g_sdl_dev || !g_primed) return -1;
+#ifdef XBOXRECOMP_HAVE_SDL3
+    SDL_LockAudioStream(g_sdl_stream);
+    n = (int)(g_ring_w - g_ring_r) + SDL_GetAudioStreamQueued(g_sdl_stream) / (XA2_CHANNELS * (int)sizeof(int16_t));
+    SDL_UnlockAudioStream(g_sdl_stream);
+#else
+    SDL_LockAudioDevice(g_sdl_dev);
+    n = (int)(g_ring_w - g_ring_r);
+    SDL_UnlockAudioDevice(g_sdl_dev);
+#endif
+    return n;
+}
 
 #endif /* _WIN32 */

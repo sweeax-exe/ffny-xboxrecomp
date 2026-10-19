@@ -11,6 +11,8 @@
  *   - Thread priorities use NT KPRIORITY increments
  */
 
+#include <stdio.h>
+#include <stdlib.h>
 #include "kernel.h"
 #include "xbox_memory_layout.h"   /* XBOX_WORKER_STACK_* + worker-stack decls */
 
@@ -191,12 +193,51 @@ NTSTATUS __stdcall xbox_KeDelayExecutionThread(
         ms = (DWORD)(diff / 10000);
     }
 
-    if (Alertable) {
-        DWORD result = SleepEx(ms, TRUE);
-        if (result == WAIT_IO_COMPLETION)
+    {
+        /* RECOMP_SLEEP_TRACE=1: how late a time-critical guest thread (an audio
+         * mixer, as a rule) wakes from its sleeps, every two seconds. */
+        static int trace = -1;
+        static LARGE_INTEGER freq, last_report;
+        static unsigned calls, late2, late5, late10, late20;
+        static double worst;
+        LARGE_INTEGER t0, t1;
+        DWORD result = 0;
+        int traced;
+        if (trace < 0) {
+            trace = getenv("RECOMP_SLEEP_TRACE") != NULL;
+            QueryPerformanceFrequency(&freq);
+        }
+        traced = trace && GetThreadPriority(GetCurrentThread()) == THREAD_PRIORITY_TIME_CRITICAL;
+        if (traced)
+            QueryPerformanceCounter(&t0);
+        if (Alertable)
+            result = SleepEx(ms, TRUE);
+        else
+            Sleep(ms);
+        if (traced) {
+            double over;
+            QueryPerformanceCounter(&t1);
+            over = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)freq.QuadPart - (double)ms;
+            calls++;
+            late2 += over > 2.0;
+            late5 += over > 5.0;
+            late10 += over > 10.0;
+            late20 += over > 20.0;
+            if (over > worst)
+                worst = over;
+            if (!last_report.QuadPart)
+                last_report = t1;
+            if (t1.QuadPart - last_report.QuadPart > 2 * freq.QuadPart) {
+                fprintf(stderr, "  [SLEEP] time-critical sleeps of %lu ms: %u, late >2 ms %u, >5 ms %u,"
+                                " >10 ms %u, >20 ms %u, worst %.1f ms\n",
+                        (unsigned long)ms, calls, late2, late5, late10, late20, worst);
+                calls = late2 = late5 = late10 = late20 = 0;
+                worst = 0.0;
+                last_report = t1;
+            }
+        }
+        if (Alertable && result == WAIT_IO_COMPLETION)
             return STATUS_ALERTED;
-    } else {
-        Sleep(ms);
     }
 
     return STATUS_SUCCESS;

@@ -941,10 +941,25 @@ void xbox_HostInputScriptControls(const uint8_t *held)
     LeaveCriticalSection(&H.cs);
 }
 
-/* Online play (xbox_HostInputSetNetplay). */
+/* Online play (xbox_HostInputSetNetplay, xbox_HostInputSetNetplayMulti). */
 static volatile LONG g_np_on;
-static volatile LONG g_np_local, g_np_remote;
+static volatile LONG g_np_local, g_np_remote_mask;
 static DWORD (*volatile g_np_remote_state)(XBOX_INPUT_STATE *state);
+static DWORD (*volatile g_np_remote_slot_state)(int slot, XBOX_INPUT_STATE *state);
+
+void xbox_HostInputSetNetplayMulti(int enable, int local_slot, unsigned remote_mask,
+                                   DWORD (*remote)(int slot, XBOX_INPUT_STATE *state))
+{
+    InterlockedExchange(&g_np_on, 0);
+    remote_mask &= (1u << SLOTS) - 1u;
+    if (!enable || local_slot < 0 || local_slot >= SLOTS || !remote_mask || (remote_mask & (1u << local_slot)))
+        return;
+    g_np_local = local_slot;
+    g_np_remote_mask = (LONG)remote_mask;
+    g_np_remote_state = NULL;
+    g_np_remote_slot_state = remote;
+    InterlockedExchange(&g_np_on, 1);
+}
 
 void xbox_HostInputSetNetplay(int enable, int local_slot, int remote_slot,
                               DWORD (*remote)(XBOX_INPUT_STATE *state))
@@ -954,15 +969,19 @@ void xbox_HostInputSetNetplay(int enable, int local_slot, int remote_slot,
         local_slot == remote_slot)
         return;
     g_np_local = local_slot;
-    g_np_remote = remote_slot;
+    g_np_remote_mask = (LONG)(1u << remote_slot);
+    g_np_remote_slot_state = NULL;
     g_np_remote_state = remote;
     InterlockedExchange(&g_np_on, 1);
 }
 
 int xbox_HostInputPlayerCount(void)
 {
-    int n = H.players < 1 ? 1 : H.players;
-    return g_np_on && n < 2 ? 2 : n;
+    int n = H.players < 1 ? 1 : H.players, s, online = 1;
+    if (!g_np_on) return n;
+    for (s = 0; s < SLOTS; s++)
+        if (g_np_remote_mask & (1 << s)) online++;
+    return n < online ? online : n;
 }
 int xbox_HostInputKeyboardSlot(void) { return H.kb_slot; }
 
@@ -1027,10 +1046,13 @@ DWORD xbox_HostInputGetState(int slot, XBOX_INPUT_STATE *state)
     if (!H.running || slot < 0 || slot >= SLOTS || !state) return ERROR_DEVICE_NOT_CONNECTED;
     if (g_np_on) {
         DWORD (*remote)(XBOX_INPUT_STATE *) = g_np_remote_state;
+        DWORD (*remote_slot)(int, XBOX_INPUT_STATE *) = g_np_remote_slot_state;
         if (slot == g_np_local)
             return xbox_HostInputGetLocalState(state);
-        if (slot == g_np_remote && remote)
-            return remote(state);
+        if (g_np_remote_mask & (1 << slot)) {
+            if (remote_slot) return remote_slot(slot, state);
+            if (remote) return remote(state);
+        }
         return ERROR_DEVICE_NOT_CONNECTED;
     }
     EnterCriticalSection(&H.cs);

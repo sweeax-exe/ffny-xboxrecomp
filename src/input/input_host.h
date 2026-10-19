@@ -143,6 +143,11 @@ int xbox_HostInputSlotInfo(int slot, char *name, int size);
 void xbox_HostInputSetNetplay(int enable, int local_slot, int remote_slot,
                               DWORD (*remote)(XBOX_INPUT_STATE *state));
 
+/* Online play with more than one other player: this PC's player in `local_slot`, every slot in
+ * `remote_mask` (bit n = slot n) reported by `remote` for that slot, every other slot empty. */
+void xbox_HostInputSetNetplayMulti(int enable, int local_slot, unsigned remote_mask,
+                                   DWORD (*remote)(int slot, XBOX_INPUT_STATE *state));
+
 /* This PC's player's state as the title would read it (the first device), for
  * online play to send; it ignores the netplay assignment. */
 DWORD xbox_HostInputGetLocalState(XBOX_INPUT_STATE *state);

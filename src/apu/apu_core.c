@@ -1042,6 +1042,17 @@ void mcpx_apu_monitor_frame(MCPXAPUState *d)
      * has to start from silence. */
     memset(d->monitor.frame_buf, 0, sizeof(d->monitor.frame_buf));
 
+    {
+        /* RECOMP_AUDIO_MUTE=1: run the audio at its pace but play silence (a second
+         * copy of the game on the same PC). */
+        static int mute_env = -1;
+        if (mute_env < 0) {
+            const char *e = getenv("RECOMP_AUDIO_MUTE");
+            mute_env = e && *e == '1';
+            if (mute_env)
+                g_audio_muted = 1;
+        }
+    }
     if (g_audio_muted) {
         memset(period, 0, sizeof(period));
     } else {

@@ -135,6 +135,18 @@ DWORD xbox_HostInputRumble(int slot, WORD low, WORD high);
  * a short description into `name` if given. */
 int xbox_HostInputSlotInfo(int slot, char *name, int size);
 
+/* Online play: this PC's player (its first device: the pad or keyboard in slot 1)
+ * is seen in `local_slot`, the other player's controller, as `remote` reports it,
+ * in `remote_slot`, and every other slot is empty. Rumble for the local slot goes
+ * to that device; rumble for the remote slot is dropped. `enable` 0 restores the
+ * ordinary assignment. The hub has at least two controllers while it is on. */
+void xbox_HostInputSetNetplay(int enable, int local_slot, int remote_slot,
+                              DWORD (*remote)(XBOX_INPUT_STATE *state));
+
+/* This PC's player's state as the title would read it (the first device), for
+ * online play to send; it ignores the netplay assignment. */
+DWORD xbox_HostInputGetLocalState(XBOX_INPUT_STATE *state);
+
 #ifdef __cplusplus
 }
 #endif

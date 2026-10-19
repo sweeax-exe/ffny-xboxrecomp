@@ -3141,6 +3141,41 @@ static void draw_primitive(void)
                     gm_val[slot] = (uint16_t)gnv;
                     lidx[k] = (uint16_t)gnv++;
                 }
+                /* Anamorphic widescreen (d3d8_Nv2aSetFlatSqueeze): is this a
+                 * screen-space draw that spans the screen? The program runs on
+                 * the CPU for the first vertex only, unless that one is flat
+                 * (w == 1, which no 3D vertex is); then for all of them, which
+                 * for the HUD and menus is a handful. Off, it costs nothing. */
+                {
+                    extern float d3d8_Nv2aFlatSqueeze(void);
+                    extern void d3d8_Nv2aSetDrawFullWidth(int full);
+                    int full = 0;
+                    if (d3d8_Nv2aFlatSqueeze() < 1.0f && gnv) {
+                        float lo = 1e30f, hi = -1e30f;
+                        uint32_t v2;
+                        for (v2 = 0; v2 < gnv && v2 < 4096; v2++) {
+                            float in[16][4];
+                            const float *src = gv + (size_t)v2 * 64;
+                            NvVshOutput o;
+                            uint32_t a, at = 0;
+                            for (a = 0; a < 16; a++) {
+                                if ((used >> a) & 1) {
+                                    memcpy(in[a], src + at, sizeof in[a]);
+                                    at += 4;
+                                } else {
+                                    in[a][0] = in[a][1] = in[a][2] = 0.0f;
+                                    in[a][3] = 1.0f;
+                                }
+                            }
+                            if (!nv2a_vsh_run_ready((const float (*)[4])in, &o) || fabsf(o.pos[3] - 1.0f) > 0.001f)
+                                break;      /* a 3D draw (or one the CPU cannot run): not ours to judge */
+                            if (o.pos[0] < lo) lo = o.pos[0];
+                            if (o.pos[0] > hi) hi = o.pos[0];
+                        }
+                        full = v2 == gnv && lo <= 0.5f && hi >= 639.5f;
+                    }
+                    d3d8_Nv2aSetDrawFullWidth(full);
+                }
                 /* Pack the vertices to their real stride (they were written
                  * 64 floats apart so the fetch above could index directly). */
                 {

@@ -280,7 +280,8 @@ int nv2a_vsh_emit_hlsl(char *out, int size, uint32_t *inputs_used)
 
     hb(&b, "cbuffer VshConsts : register(b1) { float4 c[%d]; };\n", VSH_CONSTS);
     /* x, y: 2 / screen size; z: 1 / zmax; w: unused. TexScale: what a linear
-     * texture's texel coordinates are divided by (1 for a swizzled one). */
+     * texture's texel coordinates are divided by (1 for a swizzled one); its z
+     * scales flat (w == 1) vertices horizontally (d3d8_Nv2aSetFlatSqueeze). */
     hb(&b, "cbuffer VshFrame : register(b2) { float4 Screen; float4 TexScale; };\n");
     hb(&b, "struct VS_IN {\n");
     for (a = 0; a < 16; a++)
@@ -391,6 +392,11 @@ int nv2a_vsh_emit_hlsl(char *out, int size, uint32_t *inputs_used)
     hb(&b, "    VS_OUT o;\n"
            "    float w = R[12].w;\n"
            "    float2 ndc = float2(R[12].x * Screen.x - 1.0, 1.0 - R[12].y * Screen.y);\n"
+           /* A screen-space draw (menus, HUD, movies) has w == 1; a 3D one has
+            * w of at least the near plane. Only the first is squeezed, so with
+            * an anamorphic 16:9 picture it keeps its shape, centred. TexScale.z
+            * is 1 for a draw that spans the screen (d3d8_Nv2aSetDrawFullWidth). */
+           "    if (abs(w - 1.0) < 0.001) ndc.x *= TexScale.z;\n"
            "    o.pos = float4(ndc * w, R[12].z * Screen.z * w, w);\n"
            "    o.diffuse = saturate(O[3]);\n"
            "    o.specular = saturate(O[4]);\n"

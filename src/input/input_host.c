@@ -941,7 +941,29 @@ void xbox_HostInputScriptControls(const uint8_t *held)
     LeaveCriticalSection(&H.cs);
 }
 
-int xbox_HostInputPlayerCount(void) { return H.players < 1 ? 1 : H.players; }
+/* Online play (xbox_HostInputSetNetplay). */
+static volatile LONG g_np_on;
+static volatile LONG g_np_local, g_np_remote;
+static DWORD (*volatile g_np_remote_state)(XBOX_INPUT_STATE *state);
+
+void xbox_HostInputSetNetplay(int enable, int local_slot, int remote_slot,
+                              DWORD (*remote)(XBOX_INPUT_STATE *state))
+{
+    InterlockedExchange(&g_np_on, 0);
+    if (!enable || local_slot < 0 || local_slot >= SLOTS || remote_slot < 0 || remote_slot >= SLOTS ||
+        local_slot == remote_slot)
+        return;
+    g_np_local = local_slot;
+    g_np_remote = remote_slot;
+    g_np_remote_state = remote;
+    InterlockedExchange(&g_np_on, 1);
+}
+
+int xbox_HostInputPlayerCount(void)
+{
+    int n = H.players < 1 ? 1 : H.players;
+    return g_np_on && n < 2 ? 2 : n;
+}
 int xbox_HostInputKeyboardSlot(void) { return H.kb_slot; }
 
 void xbox_HostInputKey(int code, int down)
@@ -961,10 +983,29 @@ void xbox_HostInputFocus(int focused)
     if (!focused) memset(H.key, 0, sizeof(H.key));
 }
 
+DWORD xbox_HostInputGetLocalState(XBOX_INPUT_STATE *state)
+{
+    int present;
+    if (!H.running || !state) return ERROR_DEVICE_NOT_CONNECTED;
+    EnterCriticalSection(&H.cs);
+    present = H.slot[0].device >= 0 || H.kb_slot == 0 || H.kb_merge;
+    if (present) to_state(&H.out[0], state, H.packet[0]);
+    LeaveCriticalSection(&H.cs);
+    return present ? ERROR_SUCCESS : ERROR_DEVICE_NOT_CONNECTED;
+}
+
 DWORD xbox_HostInputGetState(int slot, XBOX_INPUT_STATE *state)
 {
     int present;
     if (!H.running || slot < 0 || slot >= SLOTS || !state) return ERROR_DEVICE_NOT_CONNECTED;
+    if (g_np_on) {
+        DWORD (*remote)(XBOX_INPUT_STATE *) = g_np_remote_state;
+        if (slot == g_np_local)
+            return xbox_HostInputGetLocalState(state);
+        if (slot == g_np_remote && remote)
+            return remote(state);
+        return ERROR_DEVICE_NOT_CONNECTED;
+    }
     EnterCriticalSection(&H.cs);
     present = H.slot[slot].device >= 0 || slot == H.kb_slot || (H.kb_merge && slot == 0);
     if (present) to_state(&H.out[slot], state, H.packet[slot]);
@@ -975,6 +1016,10 @@ DWORD xbox_HostInputGetState(int slot, XBOX_INPUT_STATE *state)
 DWORD xbox_HostInputRumble(int slot, WORD low, WORD high)
 {
     if (!H.running || slot < 0 || slot >= SLOTS) return ERROR_DEVICE_NOT_CONNECTED;
+    if (g_np_on) {
+        if (slot != g_np_local) return ERROR_SUCCESS;     /* the other player's pad is not here */
+        slot = 0;
+    }
     EnterCriticalSection(&H.cs);
     H.slot[slot].low = low;
     H.slot[slot].high = high;

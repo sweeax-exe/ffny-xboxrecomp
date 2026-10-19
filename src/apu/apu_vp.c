@@ -1090,6 +1090,50 @@ static void vp_ring_report(unsigned secs)
  * Sample fetching from voice buffers
  * ============================================================ */
 
+/* RECOMP_APU_RING_TRACE=1: for voices 0xF8-0xFA, a looping buffer voice used as
+ * a ring (Def Jam streams its menu music this way: six channels, 2,400 frames,
+ * 50 ms), compare every sample read with the one read at the same ring position
+ * a lap earlier. Eight or more equal non-zero samples in a row mean the title
+ * had not refilled that stretch and playback lapped the writer: a stretch of
+ * old music, heard as a click. Local diagnostic; the frame number counts the
+ * voice's 32-sample frames, so frame * 32 is the sample index in a
+ * RECOMP_APU_VOICE_PCM capture. */
+static uint64_t s_stream_frames[MCPX_HW_MAX_VOICES];
+static int ring_trace_on(uint32_t v)
+{
+    static int on = -1;
+    if (on < 0)
+        on = getenv("RECOMP_APU_RING_TRACE") != NULL;
+    return on && v >= 0xF8 && v <= 0xFA;
+}
+
+static void ring_trace_sample(uint32_t v, uint32_t cbo, float left, float right)
+{
+    enum { RING = 65536 };
+    static int32_t prev[3][RING];
+    static unsigned run[3], events[3], lines, samples[3];
+    static uint32_t run_start[3];
+    unsigned k = v - 0xF8;
+    int32_t key = (int32_t)(left * 32767.0f) * 65536 + (int32_t)(right * 32767.0f);
+    if (cbo >= RING)
+        return;
+    samples[k]++;
+    if (key != 0 && prev[k][cbo] == key) {
+        if (run[k]++ == 0)
+            run_start[k] = cbo;
+        if (run[k] == 8) {
+            events[k]++;
+            if (lines++ < 3000)
+                fprintf(stderr, "[RING] v%02X frame %llu stale from ring position %u (event %u, %u samples read) at %lld ms\n",
+                        v, (unsigned long long)s_stream_frames[v], run_start[k], events[k], samples[k],
+                        (long long)qemu_clock_get_ms(QEMU_CLOCK_REALTIME));
+        }
+    } else {
+        run[k] = 0;
+    }
+    prev[k][cbo] = key;
+}
+
 static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
                        int num_samples_requested)
 {
@@ -1210,6 +1254,7 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
 
     int sample_count = 0;
     hwaddr stat_addr = 0;
+    int ring_trace = !stream && loop && ring_trace_on(v);
     for (; (sample_count < num_samples_requested) && (cbo <= ebo);
          sample_count++, cbo++) {
         if (sample_count == 0 && s_vstat_on != 0) {
@@ -1292,6 +1337,8 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
         if (!stereo) {
             samples[sample_count][1] = samples[sample_count][0];
         }
+        if (ring_trace)
+            ring_trace_sample(v, cbo, samples[sample_count][0], samples[sample_count][1]);
     }
 
     vp_stat_samples(v, samples, sample_count, stat_addr,
@@ -1528,6 +1575,7 @@ static void voice_process(MCPXAPUState *d,
              * as raw 48 kHz stereo 16-bit in <prefix>F8.pcm etc. Local only. */
             static const char *prefix = (const char *)1;
             static FILE *f[3];
+            s_stream_frames[v]++;
             if (prefix == (const char *)1)
                 prefix = getenv("RECOMP_APU_VOICE_PCM");
             if (prefix && v >= 0xF8 && v <= 0xFA) {

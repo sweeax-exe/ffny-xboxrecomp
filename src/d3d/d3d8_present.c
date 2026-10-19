@@ -16,6 +16,7 @@ static volatile LONG g_keep_aspect = 1;
 static volatile LONG g_aspect_num = 4, g_aspect_den = 3;
 static volatile LONG g_vsync = -1;
 static volatile LONG g_linear = 1;
+static volatile LONG g_post_aa = 0, g_post_sharpen = 0;   /* d3d8_present_set_post */
 
 static ID3D11Texture2D *g_game_texture;
 static ID3D11ShaderResourceView *g_game_srv;
@@ -32,6 +33,16 @@ static ID3D11Buffer *g_fill_cb;
 static BOOL g_game_mips;
 static volatile LONG g_fill_request;
 void d3d8_RequestSideFill(void) { InterlockedExchange(&g_fill_request, 1); }
+static ID3D11Buffer *g_post_constants;
+
+/* The pixel shader's constants (register b1); 32 bytes, a multiple of 16. */
+typedef struct {
+    float texel[2];     /* one texel of the game target, in UV */
+    float px[2];        /* one window pixel of the picture, in UV */
+    float ratio[2];     /* game texels per window pixel */
+    float aa;           /* 1: area resolve and edge smoothing */
+    float sharpen;      /* 0..1 */
+} PresentConstants;
 
 void d3d8_present_enable_scaling(int enable) { g_scaling = enable ? TRUE : FALSE; }
 void d3d8_present_set_render_scale(unsigned scale) { g_scale_override = scale > 4 ? 4 : scale; }
@@ -54,6 +65,14 @@ void d3d8_present_set_vsync(int vsync)
 void d3d8_present_set_linear_filter(int linear)
 {
     InterlockedExchange(&g_linear, linear ? 1 : 0);
+}
+
+void d3d8_present_set_post(int aa, int sharpen_percent)
+{
+    if (sharpen_percent < 0) sharpen_percent = 0;
+    if (sharpen_percent > 100) sharpen_percent = 100;
+    InterlockedExchange(&g_post_aa, aa ? 1 : 0);
+    InterlockedExchange(&g_post_sharpen, sharpen_percent);
 }
 
 BOOL d3d8_present_scaling(void) { return g_scaling; }
@@ -218,6 +237,7 @@ ID3D11Texture2D *d3d8_present_game_texture(void) { return g_game_texture; }
 
 void d3d8_present_shutdown(void)
 {
+    if (g_post_constants) { ID3D11Buffer_Release(g_post_constants); g_post_constants = NULL; }
     if (g_sampler_nearest) { ID3D11SamplerState_Release(g_sampler_nearest); g_sampler_nearest = NULL; }
     if (g_sampler_linear) { ID3D11SamplerState_Release(g_sampler_linear); g_sampler_linear = NULL; }
     if (g_ps) { ID3D11PixelShader_Release(g_ps); g_ps = NULL; }
@@ -274,16 +294,45 @@ HRESULT d3d8_present_create_game_target(UINT width, UINT height, ID3D11RenderTar
     return S_OK;
 }
 
+/* The picture's way into the window, in three optional steps:
+ *
+ *  - Area resolve (aa). The game target is render_scale times 640x480 and is
+ *    usually larger than the picture in the window; one bilinear tap per
+ *    window pixel then reads only part of each footprint, and the skipped
+ *    texels come back as shimmer on edges. Four taps spread over the footprint
+ *    average all of it.
+ *  - Edge smoothing (aa). Where the local contrast says there is an edge, blend
+ *    half a pixel across it, along the edge's own direction: what survives the
+ *    resolve of a stair step is softened without blurring flat detail.
+ *  - Sharpening. Unsharp masking against the four neighbours, weaker where the
+ *    contrast is already high and clamped to the neighbourhood's range, so it
+ *    restores texture detail without halos.
+ *
+ * With aa off and sharpening at 0 the shader is the plain single tap it always
+ * was. Captures and goldens read the game target, not this. */
 static HRESULT present_create_pipeline(void)
 {
     static const char shader[] =
         "Texture2D pixels : register(t0);\n"
         "SamplerState smp : register(s0);\n"
+        "cbuffer Post : register(b1) { float2 texel; float2 px; float2 ratio; float aa; float sharpen; };\n"
         "struct V { float4 p : SV_Position; float2 uv : TEXCOORD0; };\n"
         "V vs(uint id : SV_VertexID) {\n"
         " V o; o.p = float4(id==2?3:-1, id==1?3:-1, 0, 1);\n"
         " o.uv = float2(id==2?2:0, id==1?-1:1); return o; }\n"
         "cbuffer Fill : register(b0) { float4 Box; float4 Look; };\n"
+        "float3 tap(float2 uv) { return pixels.SampleLevel(smp, uv, 0).rgb; }\n"
+        "float3 resolve(float2 uv) {\n"
+        " float3 r;\n"
+        " if (aa < 0.5 || max(ratio.x, ratio.y) <= 1.01) {\n"
+        "  r = tap(uv);\n"
+        " } else {\n"
+        "  float2 o = texel * 0.25 * max(ratio, 1);\n"
+        "  r = 0.25 * (tap(uv + float2(-o.x, -o.y)) + tap(uv + float2(o.x, -o.y))\n"
+        "            + tap(uv + float2(-o.x, o.y)) + tap(uv + float2(o.x, o.y)));\n"
+        " }\n"
+        " return r; }\n"
+        "float luma(float3 c) { return dot(c, float3(0.299, 0.587, 0.114)); }\n"
         "float4 ps(V i) : SV_Target {\n"
         " if (Look.x > 0.5 && (i.uv.x < Box.x || i.uv.x > Box.y)) {\n"
         "  float2 s = float2(Box.x + i.uv.x * (Box.y - Box.x), i.uv.y);\n"
@@ -292,15 +341,51 @@ static HRESULT present_create_pipeline(void)
         "   c += pixels.SampleLevel(smp, s + float2(k, l) * Box.zw, Look.y).rgb;\n"
         "  c /= 25.0; c = lerp(dot(c, float3(0.299, 0.587, 0.114)).xxx, c, 0.8) * Look.z;\n"
         "  return float4(c, 1); }\n"
-        " return float4(pixels.SampleLevel(smp, i.uv, 0).rgb, 1); }\n";
+        " float2 uv = i.uv;\n"
+        " float3 c = resolve(uv);\n"
+        " if (aa < 0.5 && sharpen <= 0) return float4(c, 1);\n"
+        " float3 n = resolve(uv + float2(0, -px.y)), s = resolve(uv + float2(0, px.y));\n"
+        " float3 w = resolve(uv + float2(-px.x, 0)), e = resolve(uv + float2(px.x, 0));\n"
+        " float lc = luma(c), ln = luma(n), ls = luma(s), lw = luma(w), le = luma(e);\n"
+        " float lo = min(lc, min(min(ln, ls), min(lw, le)));\n"
+        " float hi = max(lc, max(max(ln, ls), max(lw, le)));\n"
+        " float range = hi - lo;\n"
+        " if (aa > 0.5 && range > max(0.04, hi * 0.15)) {\n"
+        "  bool horizontal = abs(ln + ls - 2 * lc) >= abs(lw + le - 2 * lc);\n"
+        "  float2 across = horizontal ? float2(0, px.y) : float2(px.x, 0);\n"
+        "  float2 along = horizontal ? float2(px.x, 0) : float2(0, px.y);\n"
+        "  float g1 = horizontal ? abs(ln - lc) : abs(lw - lc);\n"
+        "  float g2 = horizontal ? abs(ls - lc) : abs(le - lc);\n"
+        "  float2 side = (g1 >= g2 ? -0.5 : 0.5) * across;\n"
+        "  float3 blend = 0.25 * (tap(uv + side - along) + 2 * tap(uv + side) + tap(uv + side + along));\n"
+        "  float amount = saturate(abs(0.25 * (ln + ls + lw + le) - lc) / range);\n"
+        "  c = lerp(c, blend, 0.35 + 0.4 * amount);\n"
+        " }\n"
+        " if (sharpen > 0) {\n"
+        "  float3 blur = 0.25 * (n + s + w + e);\n"
+        "  float3 lo3 = min(c, min(min(n, s), min(w, e))), hi3 = max(c, max(max(n, s), max(w, e)));\n"
+        "  c = clamp(c + sharpen * saturate(1 - 2 * range) * (c - blur), lo3, hi3);\n"
+        " }\n"
+        " return float4(c, 1); }\n";
     ID3D11Device *device = d3d8_GetD3D11Device();
-    ID3DBlob *vs = NULL, *ps = NULL;
+    ID3DBlob *vs = NULL, *ps = NULL, *errors = NULL;
     D3D11_SAMPLER_DESC sd;
+    D3D11_BUFFER_DESC bd;
     HRESULT hr;
 
     if (g_deferred) return S_OK;
     hr = D3DCompile(shader, sizeof(shader) - 1, NULL, NULL, NULL, "vs", "vs_4_0", 0, 0, &vs, NULL);
-    if (SUCCEEDED(hr)) hr = D3DCompile(shader, sizeof(shader) - 1, NULL, NULL, NULL, "ps", "ps_4_0", 0, 0, &ps, NULL);
+    if (SUCCEEDED(hr)) hr = D3DCompile(shader, sizeof(shader) - 1, NULL, NULL, NULL, "ps", "ps_4_0", 0, 0, &ps, &errors);
+    if (errors) {
+        fprintf(stderr, "D3D8: present shader: %.*s\n", (int)ID3D10Blob_GetBufferSize(errors),
+                (const char *)ID3D10Blob_GetBufferPointer(errors));
+        ID3D10Blob_Release(errors);
+    }
+    memset(&bd, 0, sizeof(bd));
+    bd.ByteWidth = sizeof(PresentConstants);
+    bd.Usage = D3D11_USAGE_DEFAULT;
+    bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    if (SUCCEEDED(hr)) hr = ID3D11Device_CreateBuffer(device, &bd, NULL, &g_post_constants);
     if (SUCCEEDED(hr)) hr = ID3D11Device_CreateVertexShader(device,
         ID3D10Blob_GetBufferPointer(vs), ID3D10Blob_GetBufferSize(vs), NULL, &g_vs);
     if (SUCCEEDED(hr)) hr = ID3D11Device_CreatePixelShader(device,
@@ -406,6 +491,21 @@ HRESULT d3d8_present_blit(void)
     viewport.Height = (float)fit.height;
     viewport.MaxDepth = 1.0f;
     sampler = g_linear ? g_sampler_linear : g_sampler_nearest;
+    {
+        D3D11_TEXTURE2D_DESC game;
+        PresentConstants k;
+        ID3D11Texture2D_GetDesc(g_game_texture, &game);
+        k.texel[0] = 1.0f / (float)game.Width;
+        k.texel[1] = 1.0f / (float)game.Height;
+        k.px[0] = 1.0f / (float)(fit.width ? fit.width : 1);
+        k.px[1] = 1.0f / (float)(fit.height ? fit.height : 1);
+        k.ratio[0] = (float)game.Width * k.px[0];
+        k.ratio[1] = (float)game.Height * k.px[1];
+        k.aa = g_post_aa ? 1.0f : 0.0f;
+        k.sharpen = (float)g_post_sharpen / 100.0f;
+        ID3D11DeviceContext_UpdateSubresource(g_deferred, (ID3D11Resource *)g_post_constants, 0, NULL, &k, 0, 0);
+        ID3D11DeviceContext_PSSetConstantBuffers(g_deferred, 1, 1, &g_post_constants);
+    }
 
     ID3D11DeviceContext_ClearRenderTargetView(g_deferred, g_window_rtv, black);
     ID3D11DeviceContext_RSSetViewports(g_deferred, 1, &viewport);

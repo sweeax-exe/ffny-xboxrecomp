@@ -95,6 +95,11 @@ void d3d8_present_set_aspect(int keep, unsigned num, unsigned den);
  * choice to RECOMP_PRESENT_VSYNC, which waits one refresh. */
 void d3d8_present_set_vsync(int vsync);
 
+/* Post-processing on the way into the window (Direct3D 11): aa = 1 averages
+ * the whole footprint of each window pixel and smooths remaining edges;
+ * sharpen_percent 0..100 sharpens. 0, 0 is the plain single-tap scale. */
+void d3d8_present_set_post(int aa, int sharpen_percent);
+
 /* 1 while presents are being paced on the display, which makes the display
  * the title's frame clock. A host whose title is otherwise paced by a timer
  * should relax that timer while this holds (xbox_Nv2aSetFlipHz), or the two

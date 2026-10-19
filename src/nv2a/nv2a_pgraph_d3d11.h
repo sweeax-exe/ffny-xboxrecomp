@@ -101,6 +101,10 @@ int pgraph_d3d11_replace_texture_ready(uint32_t guest_addr, const void *data,
  * Call after binding: binding resets both axes to clamp. */
 void pgraph_d3d11_set_texture_address(uint32_t nv2a_u, uint32_t nv2a_v);
 void pgraph_d3d11_set_texture_filter(uint32_t nv2a_filter);
+/* Host setting: textures the title filters linearly are filtered
+ * anisotropically up to this many samples (1 = off, 2..16). Any thread; it
+ * takes effect at the next texture bind. */
+void pgraph_d3d11_set_anisotropy(int max_anisotropy);
 
 /* A batch drawn with the current NV2A vertex program run on the GPU (M4e):
  * `verts` holds, per vertex, one float4 for each input the program reads

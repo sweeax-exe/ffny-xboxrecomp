@@ -1146,14 +1146,31 @@ void pgraph_d3d11_set_texture_address(uint32_t nv2a_u, uint32_t nv2a_v)
  * transparent texels hold a key colour -- picked that colour up along its
  * edge: green rims on the creator's photographs. Mip levels are not uploaded,
  * so the mip half of the setting is left out. 0 (never set) keeps linear. */
+static volatile LONG g_max_anisotropy = 1;
+
+void pgraph_d3d11_set_anisotropy(int max_anisotropy)
+{
+    if (max_anisotropy < 1) max_anisotropy = 1;
+    if (max_anisotropy > 16) max_anisotropy = 16;
+    InterlockedExchange(&g_max_anisotropy, max_anisotropy);
+}
+
 void pgraph_d3d11_set_texture_filter(uint32_t nv2a_filter)
 {
     IDirect3DDevice8 *dev;
     uint32_t min = (nv2a_filter >> 16) & 0xFF, mag = (nv2a_filter >> 24) & 0xF;
     DWORD dmin = (min == 1 || min == 3 || min == 5) ? 1 /*POINT*/ : 2 /*LINEAR*/;
     DWORD dmag = (mag == 1) ? 1 : 2;
+    LONG aniso = g_max_anisotropy;
     if (!g_pg.initialized || !(dev = xbox_GetD3DDevice()))
         return;
+    /* The host's anisotropy setting, for a texture the title filters linearly
+     * both ways: floors and walls seen at a slant keep their detail instead of
+     * blurring, most of all with a texture pack's mip chain. A stage the title
+     * wants unfiltered keeps its texels (the cut-outs above). */
+    if (aniso > 1 && dmin == 2 && dmag == 2)
+        dmin = dmag = 3 /*ANISOTROPIC*/;
+    dev->lpVtbl->SetTextureStageState(dev, g_bind_stage, 21 /*MAXANISOTROPY*/, (DWORD)(aniso > 1 ? aniso : 1));
     dev->lpVtbl->SetTextureStageState(dev, g_bind_stage, 16 /*MAGFILTER*/, dmag);
     dev->lpVtbl->SetTextureStageState(dev, g_bind_stage, 17 /*MINFILTER*/, dmin);
     if (texture_pack_active()) {

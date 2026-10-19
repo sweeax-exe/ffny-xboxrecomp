@@ -1405,6 +1405,11 @@ static void *mcpx_apu_frame_thread(void *arg)
      * the device plays: left at the default it lost the cores to them in a four-fighter
      * fight and the device ran dry 23 times in four minutes instead of 10. */
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+#elif defined(_WIN32)
+    /* This thread is the sound card's clock: when it wakes late the queue
+     * runs dry and the gap is heard. It sleeps most of the time, so running
+     * it above the title's threads costs them nothing. */
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
 #endif
     qemu_mutex_lock(&d->lock);
 

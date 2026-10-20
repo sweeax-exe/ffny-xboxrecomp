@@ -595,6 +595,29 @@ static int pb_exec_verbose(void)
 static uint32_t s_dump_requested;
 /* SET_POINT_SIZE (0x043C), in pixels: the register is 6.3 fixed point. */
 static float s_point_size = 1.0f;
+
+/* Horizontal scale for flat (screen-space, w == 1) vertices: 1 normally. A host
+ * that shows the target anamorphically at 16:9 sets 0.75 so menus, HUD and
+ * movies keep their shape, centred, while the 3D scene fills the width. The
+ * D3D backend applies it (d3d8_extvs.c); it lives here, beside the per-draw
+ * verdict below, so builds without that backend link. */
+static volatile float s_flat_squeeze = 1.0f;
+static int s_draw_full_width;       /* this draw spans the screen: not squeezed */
+
+void d3d8_Nv2aSetFlatSqueeze(float squeeze)
+{
+    s_flat_squeeze = (squeeze > 0.0f && squeeze <= 1.0f) ? squeeze : 1.0f;
+}
+
+float d3d8_Nv2aFlatSqueeze(void) { return s_flat_squeeze; }
+
+/* The executor's verdict on the next draw: 1 when it is a screen-space draw
+ * reaching both the left and the right edge -- a backdrop, a fade, a vignette,
+ * possibly built of strips -- which then keeps the full width; anything
+ * narrower, such as the HUD, is squeezed as a whole. Deciding per vertex tore
+ * strip-built overlays apart. */
+static void d3d8_Nv2aSetDrawFullWidth(int full) { s_draw_full_width = full; }
+int d3d8_Nv2aDrawFullWidth(void) { return s_draw_full_width; }
 /* The batch being collected came by DRAW_ARRAYS (for the batch dump). */
 static int s_draw_arrays;
 
@@ -3147,8 +3170,6 @@ static void draw_primitive(void)
                  * (w == 1, which no 3D vertex is); then for all of them, which
                  * for the HUD and menus is a handful. Off, it costs nothing. */
                 {
-                    extern float d3d8_Nv2aFlatSqueeze(void);
-                    extern void d3d8_Nv2aSetDrawFullWidth(int full);
                     int full = 0;
                     if (d3d8_Nv2aFlatSqueeze() < 1.0f && gnv) {
                         float lo = 1e30f, hi = -1e30f;

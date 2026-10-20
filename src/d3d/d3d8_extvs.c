@@ -226,25 +226,10 @@ static ExtVs *compile(uint32_t hash, const char *hlsl, uint32_t used)
     return e;
 }
 
-/* Horizontal scale for flat (screen-space, w == 1) vertices: 1 normally. A host
- * that shows the target anamorphically at 16:9 sets 0.75 so menus, HUD and
- * movies keep their shape, centred, while the 3D scene fills the width. */
-static volatile float s_flat_squeeze = 1.0f;
-static int s_draw_full_width;       /* this draw spans the screen: not squeezed */
-
-void d3d8_Nv2aSetFlatSqueeze(float squeeze)
-{
-    s_flat_squeeze = (squeeze > 0.0f && squeeze <= 1.0f) ? squeeze : 1.0f;
-}
-
-float d3d8_Nv2aFlatSqueeze(void) { return s_flat_squeeze; }
-
-/* The executor's verdict on the next draw (nv2a_pb_exec.c): 1 when it is a
- * screen-space draw reaching both the left and the right edge -- a backdrop, a
- * fade, a vignette, possibly built of strips -- which then keeps the full
- * width; anything narrower, such as the HUD, is squeezed as a whole. Deciding
- * per vertex tore strip-built overlays apart. */
-void d3d8_Nv2aSetDrawFullWidth(int full) { s_draw_full_width = full; }
+/* The anamorphic squeeze and the executor's full-width verdict live beside the
+ * executor (nv2a_pb_exec.c), so builds without this backend link too. */
+extern float d3d8_Nv2aFlatSqueeze(void);
+extern int d3d8_Nv2aDrawFullWidth(void);
 
 /* Returns 1 if drawn, 0 if the program is not cached and hlsl was NULL (call
  * again with it), -1 if this program cannot be drawn here (fall back). */
@@ -285,7 +270,7 @@ int d3d8_Nv2aProgramDraw(uint32_t hash, const char *hlsl, uint32_t used,
     frame[3] = s_points ? s_point_size : 0.0f;
     frame[4] = texscale[0];
     frame[5] = texscale[1];
-    frame[6] = s_draw_full_width ? 1.0f : s_flat_squeeze;   /* TexScale.z: see d3d8_Nv2aSetFlatSqueeze */
+    frame[6] = d3d8_Nv2aDrawFullWidth() ? 1.0f : d3d8_Nv2aFlatSqueeze();   /* TexScale.z: see d3d8_Nv2aSetFlatSqueeze */
     frame[7] = 1.0f;
     upload(s_cb_frame, frame, sizeof frame);
 

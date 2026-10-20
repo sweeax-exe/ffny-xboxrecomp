@@ -18,6 +18,7 @@
 #define timeEndPeriod(ms)   ((void)0)
 #endif
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "input_host.h"

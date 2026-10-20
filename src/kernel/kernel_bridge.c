@@ -4336,6 +4336,187 @@ static void kernel_timer_loop_ns(void)
     }
 }
 
+/* The timer thread's starvation watchdog (Windows).
+ *
+ * TIME_CRITICAL is 15, the top of the normal band, and that is not always
+ * enough: Windows can run a title thread in the realtime band. On 2026-10-20 a
+ * thread whose base priority is 8 ran at 16 or 20 while Direct3D spun on its
+ * fence word (sub_0021EC50, the loop at 0x0021ED87, no kernel call in it), on the
+ * guest CPU, without one context switch. The GPU was stopped at a software
+ * method only this thread's interrupt releases, so the title waited for ever:
+ * about one boot in three in some runs, more with a second copy on the same CPU,
+ * and every other process pinned there starved with it, its exit included.
+ * What raised the spinning thread is not known (none of the runtime's locks was
+ * held, nothing here registers with MMCSS).
+ *
+ * So a small thread outside the guest CPU watches the tick. When the timer
+ * thread has neither come round nor spent a CPU cycle for 50 ms, and the
+ * scheduler holds it Ready (runnable, not running), it is let onto every CPU,
+ * and it pins itself back a quarter of a second later. A thread that is merely
+ * waiting is left where it is. While the guest CPU is free nothing
+ * changes: the thread stays pinned and preempts the title as an interrupt does.
+ * Only during a rescue can an interrupt run beside title code, and then the
+ * title thread on that CPU is the one waiting for it. RECOMP_TIMER_WATCHDOG=0
+ * turns it off. */
+#if defined(_WIN32)
+static HANDLE g_timer_thread_handle;
+static volatile LONG64 g_timer_beat;          /* GetTickCount64() at each tick   */
+static volatile LONG64 g_timer_free_until;    /* re-pin after this tick, 0 = pinned */
+static volatile LONG g_timer_rescues;
+
+/* The scheduler's state of one of this process's threads (SYSTEM_THREAD_INFORMATION:
+ * 1 Ready, 2 Running, 5 Waiting, 7 DeferredReady), with the wait reason through
+ * *wait; -1 if it cannot be read. One SystemProcessInformation snapshot, taken only
+ * when the cheap checks already say the thread has not run for 50 ms. x64 layout:
+ * a process record is 0x100 bytes and its 0x50-byte thread records follow it. */
+static int kernel_thread_state(DWORD tid, int *wait)
+{
+    typedef LONG (WINAPI *QuerySysInfo)(ULONG, PVOID, ULONG, PULONG);
+    static QuerySysInfo query;
+    static unsigned char *buf;
+    static ULONG cap;
+    DWORD pid = GetCurrentProcessId();
+    ULONG need = 0, off = 0;
+    LONG st;
+
+    if (sizeof(void *) != 8)
+        return -1;
+    if (!query) {
+        query = (QuerySysInfo)(void *)GetProcAddress(GetModuleHandleA("ntdll.dll"),
+                                                     "NtQuerySystemInformation");
+        if (!query)
+            return -1;
+    }
+    for (;;) {
+        if (!buf) {
+            cap = cap ? cap : (1u << 20);
+            buf = (unsigned char *)malloc(cap);
+            if (!buf)
+                return -1;
+        }
+        st = query(5 /* SystemProcessInformation */, buf, cap, &need);
+        if (st != (LONG)0xC0000004L)               /* not STATUS_INFO_LENGTH_MISMATCH */
+            break;
+        free(buf);
+        buf = NULL;
+        cap = need + (1u << 16) > cap * 2 ? need + (1u << 16) : cap * 2;
+    }
+    if (st != 0)
+        return -1;
+    for (;;) {
+        ULONG next = *(ULONG *)(buf + off);
+        ULONG nthreads = *(ULONG *)(buf + off + 4);
+        if (*(ULONG_PTR *)(buf + off + 0x50) == (ULONG_PTR)pid) {
+            ULONG i;
+            for (i = 0; i < nthreads; i++) {
+                unsigned char *t = buf + off + 0x100 + i * 0x50;
+                if (*(ULONG_PTR *)(t + 0x30) == (ULONG_PTR)tid) {
+                    *wait = (int)*(ULONG *)(t + 0x48);
+                    return (int)*(ULONG *)(t + 0x44);
+                }
+            }
+            return -1;
+        }
+        if (!next)
+            return -1;
+        off += next;
+    }
+}
+
+static DWORD WINAPI kernel_timer_watchdog(LPVOID unused)
+{
+    DWORD_PTR proc = 0, sys = 0;
+    DWORD tid = GetThreadId(g_timer_thread_handle);
+    ULONG64 cycles = 0;
+    LONG64 progress = 0;          /* last tick at which the thread was seen to run */
+
+    (void)unused;
+    if (!GetProcessAffinityMask(GetCurrentProcess(), &proc, &sys) || !proc || !tid)
+        return 0;
+    for (;;) {
+        ULONGLONG now;
+        ULONG64 c = 0;
+        LONG64 beat;
+        int state, wait = -1;
+
+        Sleep(10);
+        now = GetTickCount64();
+        beat = g_timer_beat;
+        /* Starved, not busy and not blocked. A tick can take longer than 50 ms
+         * while the thread runs (a deferred routine, the up-to-200 ms wait in
+         * xbox_DispatchLockEnter), and it spends CPU cycles all the while; it
+         * can also wait, at the same points of a boot every time, and letting
+         * it off the guest CPU then broke the boot a few frames later. Only a
+         * thread the scheduler holds Ready, spending nothing, is starved. */
+        if (QueryThreadCycleTime(g_timer_thread_handle, &c) && c != cycles) {
+            cycles = c;
+            progress = (LONG64)now;
+        }
+        if (beat > progress)
+            progress = beat;
+        if (!beat || g_timer_free_until || (LONG64)now - progress < 50)
+            continue;
+        state = kernel_thread_state(tid, &wait);
+        if (state != 1 && state != 7) {
+            static int told;
+            if (told < 5) {
+                told++;
+                fprintf(stderr, "  [KERNEL] timer thread idle for %lld ms but not starved"
+                                " (state %d, wait reason %d); left on the guest CPU (#%d)\n",
+                        (long long)((LONG64)now - progress), state, wait, told);
+            }
+            progress = (LONG64)now;              /* ask again in 50 ms, not every 10 */
+            continue;
+        }
+        InterlockedExchange64(&g_timer_free_until, (LONG64)now + 250);
+        SetThreadAffinityMask(g_timer_thread_handle, proc);
+        {
+            LONG n = InterlockedIncrement(&g_timer_rescues);
+            if (n <= 5 || n % 100 == 0)
+                fprintf(stderr, "  [KERNEL] timer thread starved for %lld ms on the guest CPU;"
+                                " let it run on any CPU for 250 ms (#%ld)\n",
+                        (long long)((LONG64)now - beat), (long)n);
+        }
+    }
+}
+
+static void kernel_timer_watchdog_start(HANDLE timer_thread)
+{
+    const char *e = getenv("RECOMP_TIMER_WATCHDOG");
+    HANDLE h;
+
+    g_timer_thread_handle = timer_thread;
+    if ((e && *e == '0') || !timer_thread)
+        return;
+    h = CreateThread(NULL, 0, kernel_timer_watchdog, NULL, 0, NULL);
+    if (h) {
+        SetThreadPriority(h, THREAD_PRIORITY_HIGHEST);
+        CloseHandle(h);
+    }
+}
+
+/* Called by the timer thread each tick: the heartbeat, and the way back to
+ * the guest CPU once a rescue has run its course. */
+static void kernel_timer_heartbeat(void)
+{
+    LONG64 now = (LONG64)GetTickCount64();
+    LONG64 until = g_timer_free_until;
+
+    InterlockedExchange64(&g_timer_beat, now);
+    if (until && now >= until) {
+        xbox_PinToGuestCore();
+        InterlockedExchange64(&g_timer_free_until, 0);
+    }
+}
+#else
+static void kernel_timer_watchdog_start(HANDLE timer_thread)
+{
+    if (timer_thread)
+        CloseHandle(timer_thread);
+}
+static void kernel_timer_heartbeat(void) {}
+#endif
+
 static DWORD WINAPI kernel_timer_thread(LPVOID unused)
 {
     int slot = xbox_worker_stack_alloc();
@@ -4389,6 +4570,7 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
             int ran;
 
             WaitForSingleObject(g_timer_wake, 1);
+            kernel_timer_heartbeat();
             kernel_vblank_tick();  /* the GPU's frame clock latches */
             kernel_ptimer_tick();  /* and its programmable alarm */
             /* Present software methods one at a time and deliver while the
@@ -4472,7 +4654,7 @@ static void kernel_set_timer(uint32_t timer_va, long long due_100ns,
         InitializeCriticalSection(&g_timer_lock);
         g_timer_started = 1;
         g_timer_wake = CreateEventA(NULL, FALSE, FALSE, NULL);
-        CloseHandle(CreateThread(NULL, 0, kernel_timer_thread, NULL, 0, NULL));
+        kernel_timer_watchdog_start(CreateThread(NULL, 0, kernel_timer_thread, NULL, 0, NULL));
     }
 
     EnterCriticalSection(&g_timer_lock);

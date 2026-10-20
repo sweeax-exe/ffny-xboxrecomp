@@ -218,6 +218,10 @@ static void attach_virtual_pads(int n)
         desc.Rumble = virtual_rumble;
         g_virtual_ids[i] = SDL_AttachVirtualJoystick(&desc);
         g_virtual_joys[i] = g_virtual_ids[i] ? SDL_OpenJoystick(g_virtual_ids[i]) : NULL;
+        if (g_virtual_joys[i]) {    /* released triggers (see xbox_HostInputScriptVirtual) */
+            SDL_SetJoystickVirtualAxis(g_virtual_joys[i], SDL_GAMEPAD_AXIS_LEFT_TRIGGER, SDL_JOYSTICK_AXIS_MIN);
+            SDL_SetJoystickVirtualAxis(g_virtual_joys[i], SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, SDL_JOYSTICK_AXIS_MIN);
+        }
         if (g_virtual_ids[i]) g_virtual_count++;
     }
 }
@@ -892,8 +896,10 @@ void xbox_HostInputScriptVirtual(int slot, const uint8_t *held)
     if (!joy) return;
     for (c = 0; c < 16; c++)
         if (buttons[c] >= 0) SDL_SetJoystickVirtualButton(joy, buttons[c], held[c] != 0);
-    SDL_SetJoystickVirtualAxis(joy, SDL_GAMEPAD_AXIS_LEFT_TRIGGER, held[INPUT_LEFT_TRIGGER] ? 32767 : 0);
-    SDL_SetJoystickVirtualAxis(joy, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, held[INPUT_RIGHT_TRIGGER] ? 32767 : 0);
+    /* A trigger's joystick axis spans the full range: SDL reads its minimum as released and 0 as
+     * half pulled, which the title takes for a held trigger. */
+    SDL_SetJoystickVirtualAxis(joy, SDL_GAMEPAD_AXIS_LEFT_TRIGGER, held[INPUT_LEFT_TRIGGER] ? 32767 : SDL_JOYSTICK_AXIS_MIN);
+    SDL_SetJoystickVirtualAxis(joy, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, held[INPUT_RIGHT_TRIGGER] ? 32767 : SDL_JOYSTICK_AXIS_MIN);
     /* SDL's Y axes point down. */
     v = (held[INPUT_LSTICK_RIGHT] ? 32767 : 0) - (held[INPUT_LSTICK_LEFT] ? 32767 : 0);
     SDL_SetJoystickVirtualAxis(joy, SDL_GAMEPAD_AXIS_LEFTX, (Sint16)v);

@@ -705,6 +705,51 @@ translate:
             /* A file of the same name under the override folder replaces a game file
              * (xbox_path_set_override_dir): a patched copy the port made from the
              * player's own file, or a mod. */
+            /* RECOMP_SKIP_FILES="movies\intro.mad;movies\thx.mad": test runs leave out files
+             * whose guest path contains one of these (case-insensitive) -- the open fails as
+             * for a missing file, so a title that tolerates that skips its intro movies. */
+            {
+                static char skip[512];
+                static int skip_read;
+                if (!skip_read) {
+                    const char *e = getenv("RECOMP_SKIP_FILES");
+                    skip_read = 1;
+                    if (e) {
+                        size_t k;
+                        for (k = 0; e[k] && k < sizeof(skip) - 1; k++) skip[k] = (char)tolower((unsigned char)e[k]);
+                        skip[k] = 0;
+                    }
+                }
+                if (skip[0]) {
+                    char lower[512], item[128];
+                    const char *p = skip;
+                    size_t k;
+                    for (k = 0; xbox_path[k] && k < sizeof(lower) - 1; k++) lower[k] = (char)tolower((unsigned char)xbox_path[k]);
+                    lower[k] = 0;
+                    while (*p) {
+                        size_t n = strcspn(p, ";");
+                        if (n && n < sizeof(item)) {
+                            memcpy(item, p, n);
+                            item[n] = 0;
+                            if (strstr(lower, item)) {
+                                /* an empty file: a player reads its end at once */
+                                WCHAR empty[MAX_PATH], tmp[MAX_PATH];
+                                HANDLE h;
+                                if (!GetTempPathW(MAX_PATH, tmp)) wcscpy_s(tmp, MAX_PATH, L".\\");
+                                swprintf_s(empty, MAX_PATH, L"%sxboxrecomp-skipped-file.empty", tmp);
+                                h = CreateFileW(empty, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                                                OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+                                if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+                                wcsncpy_s(host_path_buf, buf_size, empty, _TRUNCATE);
+                                fprintf(stderr, "  [PATH] skipped for this run (empty): %s\n", xbox_path);
+                                break;
+                            }
+                        }
+                        p += n;
+                        if (*p == ';') p++;
+                    }
+                }
+            }
             if (base_dir == s_game_dir && s_override_dir[0]) {
                 WCHAR candidate[MAX_PATH];
                 DWORD attr;

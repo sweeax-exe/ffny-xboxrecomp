@@ -22,6 +22,26 @@
  * example to print who opened a file). NULL by default. */
 void (*g_xbox_path_hook)(const char *xbox_path) = NULL;
 
+#if defined(_WIN32)
+static WCHAR s_override_dir[MAX_PATH];   /* "" = no overrides */
+#endif
+
+/* Game files found under `dir` (same relative path) are used instead of the originals.
+ * NULL or "" turns it off. Windows only for now. */
+void xbox_path_set_override_dir(const char *dir)
+{
+#if defined(_WIN32)
+    s_override_dir[0] = 0;
+    if (dir && *dir) {
+        WCHAR *p;
+        MultiByteToWideChar(CP_UTF8, 0, dir, -1, s_override_dir, MAX_PATH);
+        for (p = s_override_dir; *p; p++) if (*p == L'/') *p = L'\\';
+    }
+#else
+    (void)dir;
+#endif
+}
+
 /*
  * Helper: check if an ANSI string starts with a prefix (case-insensitive).
  * Returns the number of chars consumed from the prefix, or 0 if no match.
@@ -682,6 +702,19 @@ translate:
             CreateDirectoryW(dir_path, NULL);
         } else {
             swprintf_s(host_path_buf, buf_size, L"%s\\%s", base_dir, remainder_wide);
+            /* A file of the same name under the override folder replaces a game file
+             * (xbox_path_set_override_dir): a patched copy the port made from the
+             * player's own file, or a mod. */
+            if (base_dir == s_game_dir && s_override_dir[0]) {
+                WCHAR candidate[MAX_PATH];
+                DWORD attr;
+                swprintf_s(candidate, MAX_PATH, L"%s\\%s", s_override_dir, remainder_wide);
+                attr = GetFileAttributesW(candidate);
+                if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+                    wcsncpy_s(host_path_buf, buf_size, candidate, _TRUNCATE);
+                    fprintf(stderr, "  [PATH] override: %S\n", candidate);
+                }
+            }
         }
 
         /* An empty remainder means the title opened the device itself, so

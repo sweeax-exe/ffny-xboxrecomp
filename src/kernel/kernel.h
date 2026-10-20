@@ -565,6 +565,8 @@ BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, D
  * device rule matches reach it: partition images and unrecognised paths
  * do not. */
 extern void (*g_xbox_path_hook)(const char *xbox_path);
+/* Game files under `dir` (same relative path) replace the originals; NULL or "" turns it off. */
+void xbox_path_set_override_dir(const char *dir);
 /* Tell the script-anchor clocks a path was opened (kernel_script_anchor.c). */
 void xbox_AnchorNoteOpen(const char *xbox_path);
 

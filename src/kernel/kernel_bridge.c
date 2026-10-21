@@ -10667,6 +10667,88 @@ static void kernel_gpu_preempt(void)
     }
 }
 
+/* A guest thread found in the realtime band is put back at its own level.
+ *
+ * In some boots Windows holds the title's main thread at priority 16 with a
+ * base of 8, from start-up for the whole run (20 once, beside a second copy).
+ * Nothing here asks for it: no runtime lock was held, nothing registers with
+ * MMCSS. The 16 is a dynamic priority, and one in the realtime band never
+ * decays at quantum end, so it stays. On the one guest CPU that starves every
+ * other guest thread, the interrupt thread at 15 among them: Direct3D's fence
+ * spin then waits for an interrupt that cannot come (the deadlock
+ * kernel_timer_watchdog rescues), the loader starts seconds late, and a thread
+ * at DISPATCH_LEVEL is held there for 200 ms. Re-setting the level the thread
+ * already has resets the dynamic priority to the base; measured from outside,
+ * one call took it from 16 to 8 for good.
+ *
+ * So each guest thread looks at its own priority on kernel entry, at most every
+ * 50 ms, and re-sets its level when it is above 15. Not a TIME_CRITICAL thread
+ * (the interrupt thread), and nothing in a realtime-class process, where the
+ * band is the base. The spin itself makes no kernel call, so a thread raised
+ * just before one still needs a rescue; the next kernel entry after it clears
+ * the cause. RECOMP_PRIORITY_RESET=0 turns it off. */
+#if defined(_WIN32)
+static RECOMP_TLS ULONGLONG t_priority_next;
+
+static LONG kernel_thread_priority(LONG (WINAPI *query)(HANDLE, ULONG, PVOID, ULONG, PULONG))
+{
+    struct {                       /* THREAD_BASIC_INFORMATION */
+        LONG exit_status;
+        PVOID teb;
+        HANDLE process, thread;
+        ULONG_PTR affinity;
+        LONG priority, base;
+    } info;
+
+    if (query(GetCurrentThread(), 0 /* ThreadBasicInformation */, &info, sizeof info, NULL) != 0)
+        return -1;
+    return info.priority;
+}
+
+static void kernel_priority_check(void)
+{
+    typedef LONG (WINAPI *QueryThreadInfo)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+    static QueryThreadInfo query;
+    static volatile int on = -1;
+    static volatile LONG resets;
+    ULONGLONG now;
+    LONG was, after;
+    int level;
+
+    if (on < 0) {
+        const char *e = getenv("RECOMP_PRIORITY_RESET");
+        query = (QueryThreadInfo)(void *)GetProcAddress(GetModuleHandleA("ntdll.dll"),
+                                                        "NtQueryInformationThread");
+        on = query && !(e && *e == '0')
+             && GetPriorityClass(GetCurrentProcess()) != REALTIME_PRIORITY_CLASS;
+    }
+    if (!on)
+        return;
+    now = GetTickCount64();
+    if (now < t_priority_next)
+        return;
+    t_priority_next = now + 50;
+    was = kernel_thread_priority(query);
+    if (was <= 15)
+        return;
+    level = GetThreadPriority(GetCurrentThread());
+    if (level == THREAD_PRIORITY_TIME_CRITICAL || level == THREAD_PRIORITY_ERROR_RETURN)
+        return;
+    SetThreadPriority(GetCurrentThread(), level);
+    after = kernel_thread_priority(query);
+    {
+        LONG n = InterlockedIncrement(&resets);
+        if (n <= 5 || n % 100 == 0)
+            fprintf(stderr, "  [KERNEL] guest thread %lu ran at priority %ld (level %d);"
+                            " re-set its level, now %ld (caller 0x%08X, #%ld)\n",
+                    (unsigned long)GetCurrentThreadId(), (long)was, level, (long)after,
+                    g_esp ? BRIDGE_MEM32(g_esp) : 0, (long)n);
+    }
+}
+#else
+static void kernel_priority_check(void) {}
+#endif
+
 static void kernel_thunk_dispatch(void)
 {
     int held = t_guest_held;
@@ -10693,6 +10775,7 @@ static void kernel_thunk_dispatch_body(void)
     bridge_func_t bridge;
     ULONG ordinal;
 
+    kernel_priority_check();
     kernel_gpu_preempt();
 
     if (slot < 0 || slot >= XBOX_KERNEL_THUNK_TABLE_SIZE) {

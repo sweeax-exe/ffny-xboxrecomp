@@ -4436,12 +4436,13 @@ static DWORD WINAPI kernel_timer_watchdog(LPVOID unused)
     for (;;) {
         ULONGLONG now;
         ULONG64 c = 0;
-        LONG64 beat;
+        LONG64 beat, free_until;
         int state, wait = -1;
 
         Sleep(10);
         now = GetTickCount64();
         beat = g_timer_beat;
+        free_until = g_timer_free_until;
         /* Starved, not busy and not blocked. A tick can take longer than 50 ms
          * while the thread runs (a deferred routine, the up-to-200 ms wait in
          * xbox_DispatchLockEnter), and it spends CPU cycles all the while; it
@@ -4454,7 +4455,13 @@ static DWORD WINAPI kernel_timer_watchdog(LPVOID unused)
         }
         if (beat > progress)
             progress = beat;
-        if (!beat || g_timer_free_until || (LONG64)now - progress < 50)
+        /* A rescue window that has run out counts as closed even if the
+         * thread never got round to closing it: it may have pinned itself
+         * back and been starved again before it could (see
+         * kernel_timer_heartbeat). Waiting for it to close then waited for
+         * ever, and the deadlock this exists for came back mid-boot. */
+        if (!beat || (free_until && (LONG64)now < free_until)
+                || (LONG64)now - progress < 50)
             continue;
         state = kernel_thread_state(tid, &wait);
         if (state != 1 && state != 7) {
@@ -4474,8 +4481,9 @@ static DWORD WINAPI kernel_timer_watchdog(LPVOID unused)
             LONG n = InterlockedIncrement(&g_timer_rescues);
             if (n <= 5 || n % 100 == 0)
                 fprintf(stderr, "  [KERNEL] timer thread starved for %lld ms on the guest CPU;"
-                                " let it run on any CPU for 250 ms (#%ld)\n",
-                        (long long)((LONG64)now - beat), (long)n);
+                                " let it run on any CPU for 250 ms (#%ld)%s\n",
+                        (long long)((LONG64)now - beat), (long)n,
+                        free_until ? "; it was starved again before it closed the last window" : "");
         }
     }
 }
@@ -4503,10 +4511,16 @@ static void kernel_timer_heartbeat(void)
     LONG64 until = g_timer_free_until;
 
     InterlockedExchange64(&g_timer_beat, now);
-    if (until && now >= until) {
+    /* Close the window before pinning, not after: pinning moves this thread
+     * onto the guest CPU at once, and if a title thread is spinning there
+     * above it, the line after the pin does not run until that thread stops,
+     * which it does only once this one has delivered the interrupt it waits
+     * for. Left open, the window told the watchdog not to look. A rescue that
+     * lands between the two leaves a pinned thread with an open window, which
+     * the watchdog takes as closed once it has run out. */
+    if (until && now >= until
+            && InterlockedCompareExchange64(&g_timer_free_until, 0, until) == until)
         xbox_PinToGuestCore();
-        InterlockedExchange64(&g_timer_free_until, 0);
-    }
 }
 #else
 static void kernel_timer_watchdog_start(HANDLE timer_thread)

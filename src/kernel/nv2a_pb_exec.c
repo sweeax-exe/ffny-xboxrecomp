@@ -641,6 +641,13 @@ static int batch_dump_flip(uint32_t flip)
     return s_dump_requested && flip == s_dump_requested;
 }
 
+/* The next frame's batches, once: a player's picture report (the host's F9). */
+void nv2a_pb_dump_next_frame(void)
+{
+    s_dump_requested = s_gpu.flips + 1;
+    fprintf(stderr, "  [BATCH] dumping flip %u (a picture report)\n", s_dump_requested);
+}
+
 /* RECOMP_PB_BATCH_DUMP=shot: dump the frame after each back-buffer capture
  * (the host calls this when it takes one), so a capture aimed by time has its
  * batches beside it even though frame numbers differ from run to run. */

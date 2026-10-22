@@ -4872,8 +4872,10 @@ static void draw_primitive_body(void)
                  * surface is drawn; the copy would paint them over black. */
                 {
                     static int skip_rt = -1;
-                    if (skip_rt < 0)
-                        skip_rt = getenv("RECOMP_SKIP_RT_SAMPLE") != NULL;
+                    if (skip_rt < 0) {      /* "0" keeps them */
+                        const char *v = getenv("RECOMP_SKIP_RT_SAMPLE");
+                        skip_rt = v && *v && *v != '0';
+                    }
                     if (skip_rt && s_gpu.texs[0].valid && surf_holds_texture(s_gpu.texs[0].offset)) {
                         static unsigned skipped;
                         if ((++skipped & (skipped - 1)) == 0)

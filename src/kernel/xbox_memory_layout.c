@@ -3897,9 +3897,31 @@ uint32_t xbox_ContiguousAlloc(uint32_t size, uint32_t alignment)
     return result;
 }
 
+int xbox_ContiguousFreeNow(uint32_t addr);
+
+/* A host may hold a free back: a title that is rolled back to an earlier state
+ * can own the block again, and it must not have been handed to anyone else
+ * meanwhile. The hook returns 1 when it keeps the block for later; the host
+ * gives it back with xbox_ContiguousFreeNow once no earlier state can return. */
+int (*xbox_contig_free_defer)(uint32_t addr);
+
+/* Size of the block at addr (MmQueryAllocationSize), 0 if not tracked. */
+uint32_t xbox_ContiguousBlockSize(uint32_t addr);
+
 /* Give a block back (RECOMP_HEAP_RECLAIM only). Returns 0 when the address is
  * not one this arena tracks, so the caller can try the general heap. */
 int xbox_ContiguousFree(uint32_t addr)
+{
+    int (*defer)(uint32_t) = xbox_contig_free_defer;
+
+    if (!xbox_HeapReclaimEnabled())
+        return 0;
+    if (defer && xbox_ContiguousBlockSize(addr) && defer(addr))
+        return 1;
+    return xbox_ContiguousFreeNow(addr);
+}
+
+int xbox_ContiguousFreeNow(uint32_t addr)
 {
     int i, found = 0;
 

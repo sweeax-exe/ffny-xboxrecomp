@@ -359,6 +359,11 @@ NTSTATUS __stdcall xbox_NtCreateFile(
     return STATUS_SUCCESS;
 }
 
+/* Called with the host range a read is about to fill. The host's ReadFile writes it from kernel
+ * mode, where a page the title protected for write tracking fails the read instead of raising an
+ * exception the tracker could handle; the hook makes the range writable (and notes it) first. */
+void (*xbox_guest_write_notify)(void *host, size_t length);
+
 NTSTATUS __stdcall xbox_NtReadFile(
     HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTINE ApcRoutine, PVOID ApcContext,
     PXBOX_IO_STATUS_BLOCK IoStatusBlock, PVOID Buffer, ULONG Length,
@@ -371,6 +376,8 @@ NTSTATUS __stdcall xbox_NtReadFile(
 
     if (!IoStatusBlock)
         return STATUS_INVALID_PARAMETER;
+    if (xbox_guest_write_notify && Buffer && Length)
+        xbox_guest_write_notify(Buffer, Length);
 
     overwrite_settle(FileHandle);
     if (ByteOffset && ByteOffset->QuadPart >= 0) {

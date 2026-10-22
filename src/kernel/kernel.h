@@ -695,6 +695,8 @@ NTSTATUS __stdcall xbox_NtOpenFile(
     PXBOX_OBJECT_ATTRIBUTES ObjectAttributes, PXBOX_IO_STATUS_BLOCK IoStatusBlock,
     ULONG ShareAccess, ULONG OpenOptions);
 
+/* A hook the title's host code may set: the host range a file read is about to write. */
+extern void (*xbox_guest_write_notify)(void *host, size_t length);
 NTSTATUS __stdcall xbox_NtReadFile(
     HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTINE ApcRoutine, PVOID ApcContext,
     PXBOX_IO_STATUS_BLOCK IoStatusBlock, PVOID Buffer, ULONG Length,

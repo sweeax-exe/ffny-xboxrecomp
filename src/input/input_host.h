@@ -148,6 +148,14 @@ void xbox_HostInputSetNetplay(int enable, int local_slot, int remote_slot,
 void xbox_HostInputSetNetplayMulti(int enable, int local_slot, unsigned remote_mask,
                                    DWORD (*remote)(int slot, XBOX_INPUT_STATE *state));
 
+/* Online play, during a fight that runs in lockstep: `buttons` are taken out of what the title
+ * reads from every controller, and every slot that is no player's reads as a pad at rest instead
+ * of an unplugged one. A title may read its pause button straight from its controllers rather
+ * than from the agreed inputs, so a press would pause one game of the room only; and a port that
+ * reads as unplugged during a fight can make a title stop for a "controller disconnected" prompt,
+ * again on one PC. 0 restores both. Ignored while netplay is off. */
+void xbox_HostInputSetNetplayFight(WORD suppress_buttons);
+
 /* This PC's player's state as the title would read it (the first device), for
  * online play to send; it ignores the netplay assignment. */
 DWORD xbox_HostInputGetLocalState(XBOX_INPUT_STATE *state);

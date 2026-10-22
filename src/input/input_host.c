@@ -875,6 +875,7 @@ void xbox_HostInputScriptControls(const uint8_t *held)
 /* Online play (xbox_HostInputSetNetplay, xbox_HostInputSetNetplayMulti). */
 static volatile LONG g_np_on;
 static volatile LONG g_np_local, g_np_remote_mask;
+static volatile LONG g_np_fight_suppress;   /* xbox_HostInputSetNetplayFight */
 static DWORD (*volatile g_np_remote_state)(XBOX_INPUT_STATE *state);
 static DWORD (*volatile g_np_remote_slot_state)(int slot, XBOX_INPUT_STATE *state);
 
@@ -904,6 +905,11 @@ void xbox_HostInputSetNetplay(int enable, int local_slot, int remote_slot,
     g_np_remote_slot_state = NULL;
     g_np_remote_state = remote;
     InterlockedExchange(&g_np_on, 1);
+}
+
+void xbox_HostInputSetNetplayFight(WORD suppress_buttons)
+{
+    InterlockedExchange(&g_np_fight_suppress, (LONG)suppress_buttons);
 }
 
 int xbox_HostInputPlayerCount(void)
@@ -978,13 +984,22 @@ DWORD xbox_HostInputGetState(int slot, XBOX_INPUT_STATE *state)
     if (g_np_on) {
         DWORD (*remote)(XBOX_INPUT_STATE *) = g_np_remote_state;
         DWORD (*remote_slot)(int, XBOX_INPUT_STATE *) = g_np_remote_slot_state;
+        WORD suppress = (WORD)g_np_fight_suppress;
+        DWORD r = ERROR_DEVICE_NOT_CONNECTED;
         if (slot == g_np_local)
-            return xbox_HostInputGetLocalState(state);
-        if (g_np_remote_mask & (1 << slot)) {
-            if (remote_slot) return remote_slot(slot, state);
-            if (remote) return remote(state);
+            r = xbox_HostInputGetLocalState(state);
+        else if (g_np_remote_mask & (1 << slot)) {
+            if (remote_slot) r = remote_slot(slot, state);
+            else if (remote) r = remote(state);
         }
-        return ERROR_DEVICE_NOT_CONNECTED;
+        if (suppress) {             /* a lockstep fight: see xbox_HostInputSetNetplayFight */
+            if (r != ERROR_SUCCESS) {
+                memset(state, 0, sizeof(*state));
+                r = ERROR_SUCCESS;
+            }
+            state->Gamepad.wButtons &= (WORD)~suppress;
+        }
+        return r;
     }
     EnterCriticalSection(&H.cs);
     present = H.slot[slot].device >= 0 || slot == H.kb_slot || (H.kb_merge && slot == 0);

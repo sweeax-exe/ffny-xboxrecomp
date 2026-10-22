@@ -521,6 +521,33 @@ static HRESULT d3d11_create_device_and_swap_chain(
     }
     state->height = state->logical_height * state->render_scale;
 
+    {   /* The graphics card in every log: a picture that goes wrong on some PCs only can then be
+         * tied to a vendor, a driver or a missing optional format. */
+        IDXGIDevice *dxgi = NULL;
+        IDXGIAdapter *adapter = NULL;
+        DXGI_ADAPTER_DESC desc;
+        static const struct { DXGI_FORMAT f; const char *name; } fmts[] = {
+            { DXGI_FORMAT_B5G6R5_UNORM, "B5G6R5" }, { DXGI_FORMAT_B5G5R5A1_UNORM, "B5G5R5A1" },
+            { DXGI_FORMAT_B4G4R4A4_UNORM, "B4G4R4A4" }, { DXGI_FORMAT_A8_UNORM, "A8" },
+        };
+        unsigned i;
+        if (SUCCEEDED(ID3D11Device_QueryInterface(state->d3d11_device, &IID_IDXGIDevice, (void **)&dxgi)) &&
+            SUCCEEDED(IDXGIDevice_GetAdapter(dxgi, &adapter)) && SUCCEEDED(IDXGIAdapter_GetDesc(adapter, &desc)))
+            fprintf(stderr, "D3D8: graphics card %ls (vendor %04X, device %04X, %u MB), feature level %X\n",
+                    desc.Description, desc.VendorId, desc.DeviceId,
+                    (unsigned)(desc.DedicatedVideoMemory / (1024 * 1024)), (unsigned)feature_level);
+        else
+            fprintf(stderr, "D3D8: feature level %X (graphics card unknown)\n", (unsigned)feature_level);
+        for (i = 0; i < sizeof(fmts) / sizeof(fmts[0]); i++) {
+            UINT support = 0;
+            if (FAILED(ID3D11Device_CheckFormatSupport(state->d3d11_device, fmts[i].f, &support)) ||
+                !(support & D3D11_FORMAT_SUPPORT_TEXTURE2D) || !(support & D3D11_FORMAT_SUPPORT_SHADER_SAMPLE))
+                fprintf(stderr, "D3D8: texture format %s is NOT supported by this graphics card\n", fmts[i].name);
+        }
+        if (adapter) IDXGIAdapter_Release(adapter);
+        if (dxgi) IDXGIDevice_Release(dxgi);
+    }
+
     return S_OK;
 }
 

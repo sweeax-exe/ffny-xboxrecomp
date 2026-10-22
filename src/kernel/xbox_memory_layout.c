@@ -5170,10 +5170,29 @@ void xbox_ContiguousClaim(uint32_t va, uint32_t size)
     contig_unlock();
 }
 
-/* Release a block (RECOMP_HEAP_RECLAIM only). Returns 1 if va is in the
+/* A host may hold a free back: a title that is rolled back to an earlier state
+ * can own the block again, and it must not have been handed to anyone else
+ * meanwhile. The hook returns 1 when it keeps the block for later; the host
+ * gives it back with xbox_ContiguousFreeNow once no earlier state can return. */
+int (*xbox_contig_free_defer)(uint32_t addr);
+
+int xbox_ContiguousFreeNow(uint32_t va);
+
+/* Release a block (RECOMP_HEAP_RECLAIM only), unless the host's
+ * xbox_contig_free_defer keeps it for later. */
+int xbox_ContiguousFree(uint32_t va)
+{
+    int (*defer)(uint32_t) = xbox_contig_free_defer;
+
+    if (defer && xbox_HeapReclaimEnabled() && xbox_ContiguousBlockSize(va) && defer(va))
+        return 1;
+    return xbox_ContiguousFreeNow(va);
+}
+
+/* Release a block now (RECOMP_HEAP_RECLAIM only). Returns 1 if va is in the
  * window, 0 if this arena never handed it out -- the caller decides whether
  * that is someone else's. */
-int xbox_ContiguousFree(uint32_t va)
+int xbox_ContiguousFreeNow(uint32_t va)
 {
     static int warned;
     uint32_t first, n;

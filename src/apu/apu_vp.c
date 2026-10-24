@@ -1811,6 +1811,7 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
         next = voice_list_regs[list].next;
 
         d->regs[current] = d->regs[top];
+        int prev = -1;
 
         for (int i = 0; d->regs[current] != 0xFFFF; i++) {
             if (i >= MCPX_HW_MAX_VOICES) {
@@ -1819,7 +1820,24 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
             }
 
             uint16_t v = (uint16_t)d->regs[current];
-            if (!voice_ok(v, "voice list")) break;      /* a list that ran into junk ends here */
+            if (!voice_ok(v, "voice list")) {           /* a list that ran into junk ends here */
+                static int dumped;
+                if (dumped++ < 2) {     /* what overwrote the voice that links to it: its record, and the next one */
+                    hwaddr base = d->regs[NV_PAPU_VPVADDR];
+                    fprintf(stderr, "[APU] list %d: voice 0x%X links to 0x%X (voices at phys 0x%llX); records:\n",
+                            list, prev, v, (unsigned long long)base);
+                    if (prev >= 0)
+                        for (int k = 0; k < 2 * NV_PAVS_SIZE; k += 32) {
+                            hwaddr a = base + (hwaddr)prev * NV_PAVS_SIZE + k;
+                            fprintf(stderr, "[APU]   +%03X:", k);
+                            for (int w = 0; w < 32; w += 4)
+                                fprintf(stderr, " %08X", ldl_le_phys(address_space_memory, a + w));
+                            fprintf(stderr, "\n");
+                        }
+                }
+                break;
+            }
+            prev = v;
             d->regs[next] = voice_get_mask(d, v, NV_PAVS_VOICE_TAR_PITCH_LINK,
                                NV_PAVS_VOICE_TAR_PITCH_LINK_NEXT_VOICE_HANDLE);
 

@@ -70,9 +70,24 @@ static void set_notify_status(MCPXAPUState *d, uint32_t v, int notifier,
  * Filter helpers
  * ============================================================ */
 
+/* A voice handle the guest gave (a method's argument, a voice list's link) is checked against the
+ * voice count before it indexes the host's per-voice arrays. assert() is gone in release builds, so a
+ * handle out of range (the guest's voice list overwritten) wrote past g_dbg and the filters into the
+ * program's own data: two players' games crashed on the audio thread, jumping to 0x1E and 0x111
+ * (build 22), and rollback tests crashed the same way. The guest's own voice memory is left as the
+ * hardware would leave it; only the host side refuses. */
+static bool voice_ok(unsigned v, const char *where)
+{
+    static int told;
+    if (v < MCPX_HW_MAX_VOICES) return true;
+    if (told++ < 8)
+        fprintf(stderr, "[APU] voice handle 0x%X out of range in %s; ignored\n", v, where);
+    return false;
+}
+
 static void voice_reset_filters(MCPXAPUState *d, uint16_t v)
 {
-    assert(v < MCPX_HW_MAX_VOICES);
+    if (!voice_ok(v, "reset filters")) return;
     memset(&d->vp.filters[v].svf, 0, sizeof(d->vp.filters[v].svf));
     d->vp.filters[v].gain_valid = false;     /* a new voice starts at its level */
     hrtf_filter_clear_history(&d->vp.filters[v].hrtf);
@@ -133,6 +148,7 @@ static void voice_set_mask(MCPXAPUState *d, uint16_t voice_handle,
 
 static void voice_off(MCPXAPUState *d, uint16_t v)
 {
+    if (!voice_ok(v, "voice off")) return;
     voice_set_mask(d, v, NV_PAVS_VOICE_PAR_STATE,
                    NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE, 0);
 
@@ -140,7 +156,7 @@ static void voice_off(MCPXAPUState *d, uint16_t v)
                                  NV_PAVS_VOICE_CFG_FMT_DATA_TYPE) != 0;
     int notifier = MCPX_HW_NOTIFIER_SSLA_DONE;
     if (stream) {
-        assert(v < MCPX_HW_MAX_VOICES);
+        if (!voice_ok(v, "voice off")) return;
         assert(d->vp.ssl[v].ssl_index <= 1);
         notifier += d->vp.ssl[v].ssl_index;
     }
@@ -164,7 +180,7 @@ static void voice_spin_unlock(MCPXAPUState *d, uint16_t v)
 
 static void voice_lock(MCPXAPUState *d, uint16_t v, bool lock)
 {
-    assert(v < MCPX_HW_MAX_VOICES);
+    if (!voice_ok(v, "voice lock")) return;
     voice_spin_lock(d, v);
     d->vp.voice_locked[v] = lock;
     voice_spin_unlock(d, v);
@@ -173,7 +189,7 @@ static void voice_lock(MCPXAPUState *d, uint16_t v, bool lock)
 
 static bool is_voice_locked(MCPXAPUState *d, uint16_t v)
 {
-    assert(v < MCPX_HW_MAX_VOICES);
+    if (!voice_ok(v, "lock test")) return false;
     return d->vp.voice_locked[v] != 0;
 }
 
@@ -223,6 +239,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
 
     case NV1BA0_PIO_VOICE_ON: {
         selected_handle = argument & NV1BA0_PIO_VOICE_ON_HANDLE;
+        if (!voice_ok(selected_handle, "voice on")) break;
 
         bool locked = is_voice_locked(d, (uint16_t)selected_handle);
         if (!locked) voice_lock(d, (uint16_t)selected_handle, true);
@@ -308,6 +325,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
 
     case NV1BA0_PIO_VOICE_RELEASE: {
         selected_handle = argument & NV1BA0_PIO_VOICE_ON_HANDLE;
+        if (!voice_ok(selected_handle, "voice release")) break;
 
         bool locked = is_voice_locked(d, (uint16_t)selected_handle);
         if (!locked) voice_lock(d, (uint16_t)selected_handle, true);
@@ -476,7 +494,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
     case NV1BA0_PIO_SET_VOICE_SSL_A: {
         int ssl = 0;
         int current_voice = d->regs[NV_PAPU_FECV];
-        assert(current_voice < MCPX_HW_MAX_VOICES);
+        if (!voice_ok((unsigned)current_voice, "set voice SSL")) break;
         d->vp.ssl[current_voice].base[ssl] =
             GET_MASK(argument, NV1BA0_PIO_SET_VOICE_SSL_A_BASE);
         d->vp.ssl[current_voice].count[ssl] =
@@ -486,7 +504,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
     case NV1BA0_PIO_SET_VOICE_SSL_B: {
         int ssl = 1;
         int current_voice = d->regs[NV_PAPU_FECV];
-        assert(current_voice < MCPX_HW_MAX_VOICES);
+        if (!voice_ok((unsigned)current_voice, "set voice SSL")) break;
         d->vp.ssl[current_voice].base[ssl] =
             GET_MASK(argument, NV1BA0_PIO_SET_VOICE_SSL_A_BASE);
         d->vp.ssl[current_voice].count[ssl] =
@@ -1493,7 +1511,7 @@ static void voice_process(MCPXAPUState *d,
                           float sample_buf[NUM_SAMPLES_PER_FRAME][2],
                           uint16_t v, int voice_list)
 {
-    assert(v < MCPX_HW_MAX_VOICES);
+    if (!voice_ok(v, "voice process")) return;
     bool stereo = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_FMT,
                                  NV_PAVS_VOICE_CFG_FMT_STEREO) != 0;
     unsigned int channels = stereo ? 2 : 1;
@@ -1801,6 +1819,7 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
             }
 
             uint16_t v = (uint16_t)d->regs[current];
+            if (!voice_ok(v, "voice list")) break;      /* a list that ran into junk ends here */
             d->regs[next] = voice_get_mask(d, v, NV_PAVS_VOICE_TAR_PITCH_LINK,
                                NV_PAVS_VOICE_TAR_PITCH_LINK_NEXT_VOICE_HANDLE);
 

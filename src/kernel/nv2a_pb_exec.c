@@ -893,6 +893,9 @@ static int ws_vertex(int vsh, uint32_t used, uint32_t vi, float out[4], float uv
 static void ws_place_batch(int vsh, uint32_t used, const PgraphReadyVertex *ready, uint32_t n)
 {
     extern void pgraph_d3d11_set_placement(float kx, float bx);
+    /* The host draws logical pixels; AA scaling belongs to the software surface. */
+    uint32_t clip_x = s_gpu.clip_raw_h & 0xFFFF, clip_w = s_gpu.clip_raw_h >> 16;
+    uint32_t clip_y = s_gpu.clip_raw_v & 0xFFFF, clip_h = s_gpu.clip_raw_v >> 16;
     float k = s_ws_k, x0 = 1e30f, x1 = -1e30f, y0 = 1e30f, y1 = -1e30f, z = 0.0f, p[4], t[2];
     float u0 = 1e30f, u1 = -1e30f, v0 = 1e30f, v1 = -1e30f;
     uint32_t i, cnt = ready ? n : s_gpu.idx_count;
@@ -1005,10 +1008,10 @@ static void ws_place_batch(int vsh, uint32_t used, const PgraphReadyVertex *read
              * 0..640) does not show in the new side areas: pixel x becomes
              * x * k + 320 * (1 - k + bx). */
             float off = 320.0f * (1.0f - k + bx);
-            uint32_t cx = (uint32_t)(s_gpu.clip_x * k + off + 0.5f);
-            uint32_t cw = (uint32_t)(s_gpu.clip_w * k + 0.5f);
+            uint32_t cx = (uint32_t)(clip_x * k + off + 0.5f);
+            uint32_t cw = (uint32_t)(clip_w * k + 0.5f);
             pgraph_d3d11_set_placement(k, bx);
-            pgraph_d3d11_set_surface_clip(cx, s_gpu.clip_y, cw ? cw : 1, s_gpu.clip_h);
+            pgraph_d3d11_set_surface_clip(cx, clip_y, cw ? cw : 1, clip_h);
         } else {
             pgraph_d3d11_set_placement(1.0f, 0.0f);
         }
@@ -3979,7 +3982,7 @@ static void ws_wide_sides(int gpu, const float *gv, uint32_t gnv, uint32_t used,
             cx = (uint32_t)c0;
             cw = (uint32_t)(c1 + 0.999f) - cx;
             pgraph_d3d11_set_placement(k, d * k / 320.0f);
-            pgraph_d3d11_set_surface_clip(cx, s_gpu.clip_y, cw ? cw : 1, s_gpu.clip_h);
+            pgraph_d3d11_set_surface_clip(cx, s_gpu.clip_raw_v & 0xFFFF, cw ? cw : 1, s_gpu.clip_raw_v >> 16);
             if (gpu)
                 (void)pgraph_d3d11_draw_program(gv, gnv, used, gtri, gnt, gsu, gsv);
             else
@@ -4371,7 +4374,12 @@ static void draw_primitive(void)
                  * object, so what goes across is a host pointer the translator
                  * can copy from. */
                 bind_extra_stages(gpu);
-                pgraph_d3d11_set_surface_clip(s_gpu.clip_x, s_gpu.clip_y, s_gpu.clip_w, s_gpu.clip_h);
+                /* Host vertices and its supersampled canvas use logical pixels.
+                 * s_gpu.clip_* includes console AA (2x1/2x2) for the software
+                 * rasteriser; forwarding it clips menu subviews at twice their
+                 * viewport origin. Keep both paths in their own coordinate space. */
+                pgraph_d3d11_set_surface_clip(s_gpu.clip_raw_h & 0xFFFF, s_gpu.clip_raw_v & 0xFFFF,
+                                               s_gpu.clip_raw_h >> 16, s_gpu.clip_raw_v >> 16);
                 pgraph_d3d11_set_combiner_state(&s_gpu.rc);
                 if (s_gpu.texs[0].valid) {
                     bind_texture_ready(&s_gpu.texs[0]);

@@ -20,6 +20,7 @@ typedef uint32_t stub_format;
 
 /* src/d3d */
 void d3d8_RequestSideFill(void) {}
+void d3d8_FlushGPU(void) {}
 unsigned int d3d8_format_bpp(stub_format fmt) { (void)fmt; return 4; }
 
 /* kernel: software methods and the executor's stall */
@@ -38,8 +39,10 @@ int pgraph_d3d11_draw_program(const float *verts, uint32_t nverts, uint32_t used
                               const uint16_t *idx, uint32_t nidx,
                               float tex_u_scale, float tex_v_scale)
 { (void)verts; (void)nverts; (void)used; (void)idx; (void)nidx; (void)tex_u_scale; (void)tex_v_scale; return 0; }
+#ifndef NV2A_HOST_CLIP_TEST
 void pgraph_d3d11_draw_ready(uint32_t nv2a_prim_mode, const PgraphReadyVertex *verts, uint32_t count)
 { (void)nv2a_prim_mode; (void)verts; (void)count; }
+#endif
 void pgraph_d3d11_frame_end(void) {}
 int pgraph_d3d11_method(int subchannel, uint32_t method, uint32_t param)
 { (void)subchannel; (void)method; (void)param; return 0; }
@@ -53,8 +56,10 @@ int pgraph_d3d11_set_texture_ready(uint32_t guest_addr, const void *data, uint32
 void pgraph_d3d11_set_combiner_state(const Nv2aCombiner *state) { (void)state; }
 void pgraph_d3d11_set_placement(float kx, float bx) { (void)kx; (void)bx; }
 void pgraph_d3d11_set_point_mode(int on, float size) { (void)on; (void)size; }
+#ifndef NV2A_HOST_CLIP_TEST
 void pgraph_d3d11_set_surface_clip(uint32_t x, uint32_t y, uint32_t w, uint32_t h)
 { (void)x; (void)y; (void)w; (void)h; }
+#endif
 void pgraph_d3d11_set_texture_address(uint32_t nv2a_u, uint32_t nv2a_v) { (void)nv2a_u; (void)nv2a_v; }
 void pgraph_d3d11_set_texture_filter(uint32_t nv2a_filter) { (void)nv2a_filter; }
 const char *pgraph_d3d11_stage0_id(void) { return ""; }

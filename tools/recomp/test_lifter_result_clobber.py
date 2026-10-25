@@ -74,7 +74,7 @@ def _lift(mnemonic, operands, op_str=""):
 
 
 def _cc():
-    cc = shutil.which("clang") or shutil.which("gcc")
+    cc = shutil.which("clang") or shutil.which("gcc") or shutil.which("cl")
     if not cc and Path(r"C:\Program Files\LLVM\bin\clang.exe").exists():
         cc = r"C:\Program Files\LLVM\bin\clang.exe"
     if not cc:
@@ -187,3 +187,45 @@ def test_a_condition_never_re_reads_the_destination():
                 if made is None:
                     continue
                 assert dest_read not in made[0], (mnemonic, jcc, made[0])
+
+
+@pytest.mark.parametrize("consumer", ("750690b801000000c3", "740690b801000000c3"))
+def test_same_destination_join_survives_a_move(consumer):
+    from . import config
+    from .translator import FunctionTranslator
+    # Two distinct setters reach the join, then a flags-preserving MOV
+    # overwrites their common destination before JNE/JE consumes ZF.
+    # test edx,edx; jz alt; and ecx,15; jmp join; alt: dec ecx;
+    # join: mov ecx,esi; consumer.
+    image = bytes.fromhex("85d2740583e10feb014989f1" + consumer)
+    base = 0x10000
+    config._install([config.Section('.text', base, len(image), 0, len(image), True)],
+                    entry_point=base, kernel_thunk_addr=base, origin='joined-result-test')
+    db = {base: {'start': hex(base), 'end': base + len(image),
+                 '_addr': base, 'size': len(image)}}
+    code = FunctionTranslator(image, db).translate_function(base, db[base])
+    assert 'ecx = esi;' in code
+    assert 'if ((ecx != 0))' not in code and 'if ((ecx == 0))' not in code, code
+    assert 'if ((_fa ' in code, code
+
+
+def test_joined_result_matches_x86_after_destination_clobber():
+    from .translator import _merge_flag_states
+    cases, calls = [], []
+    for width, lo, _, lowmask in _WIDTHS:
+        whole = (1 << (width * 8)) - 1
+        merged = _merge_flag_states([('and', [_reg(lo), _imm(lowmask)]),
+                                     ('dec', [_reg(lo)])])
+        assert merged is not None
+        cond = _make_condition('jne', *merged)[0]
+        for path in (0, 1):
+            write = _lift('dec', [_reg(lo)]) if path else _lift('and', [_reg(lo), _imm(lowmask)])
+            clobber = _lift('mov', [_reg(lo), _imm(_CLOBBER)])
+            name = f'join_{width}_{path}'
+            ref = f'((a - 1u) & {whole:#x}u)' if path else f'(a & {lowmask:#x}u)'
+            cases.append(f'static int {name}(uint32_t a) {{ eax=a; {write} {clobber} return {cond}; }}')
+            calls.append(f'for (unsigned i=0;i<NV;i++) {{ uint32_t a=vals[i]; if ({name}(a) != ({ref} != 0)) failures++; }}')
+    values = ','.join(f'{v:#x}u' for v in _VALUES)
+    source = _PRELUDE + '\n'.join(cases) + f'\nstatic uint32_t vals[]={{ {values} }};\n#define NV (sizeof vals/sizeof vals[0])\nint main(void) {{ int failures=0; ' + '\n'.join(calls) + ' return failures ? 1 : 0; }'
+    ran = _build_and_run(source)
+    assert ran.returncode == 0, ran.stdout + ran.stderr

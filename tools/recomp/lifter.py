@@ -531,19 +531,18 @@ def _make_condition(jcc, flag_setter, flag_ops):
     # but agree that the zero flag came from the same destination register.
     #
     # "sub eax, ecx" on one edge and "dec eax" on the other are different
-    # setters, so the state cannot be inherited as itself -- yet both leave
-    # ZF as (eax == 0), which is all a je or jne needs. The translator
-    # recognises that case and passes this marker.
+    # setters, so the state cannot be inherited as itself -- yet both snapshot
+    # their result into _fa, which is all a je or jne needs. Read that snapshot:
+    # a flags-preserving instruction after the join may overwrite the register.
     #
     # Only ZF is answerable from it. dec does not write CF, so a jb after the
     # same join would be reading a flag one predecessor never set; returning
     # None there leaves the existing fallback in place.
     if flag_setter == "__zf_from_dest" and flag_ops:
-        dest = _fmt_operand_read(flag_ops[0])
         if jcc in ("je", "jz"):
-            return f"({dest} == 0)", desc
+            return "(_fa == 0)", desc
         if jcc in ("jne", "jnz"):
-            return f"({dest} != 0)", desc
+            return "(_fa != 0)", desc
         return None
 
     # After stc/clc/cmc, CF is _cf (the lift writes it) and nothing else is

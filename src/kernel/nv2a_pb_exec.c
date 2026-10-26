@@ -1295,6 +1295,37 @@ static void surface_swizzle_update(void)
                            &s_swz_mx, &s_swz_my);
 }
 
+#define NV_ZBUF_W 1280   /* 640x480 at 2x2 anti-aliasing */
+#define NV_ZBUF_H 1024
+
+/* CPU snapshot readers need the pixels of small render-to-texture captures
+ * in guest RAM. The host renderer does not currently read its targets back.
+ * Mirror only a complete, tightly packed ARGB surface of at most 64 KiB;
+ * ordinary framebuffers and clipped windows keep the GPU-only path. Swizzled
+ * captures must cover the allocation described by the format, not an arbitrary
+ * small clip inside a larger surface. The existing rasteriser supplies Morton
+ * addressing, guest projection/AA, combiners, blending and depth. Stencil
+ * is not implemented by the software path, so stencil-masked targets stay out. */
+static int small_capture_surface(void)
+{
+    uint32_t type = (s_gpu.format >> 8) & 0xF;
+    uint64_t bytes = (uint64_t)s_gpu.pitch * s_gpu.clip_h;
+    if (!s_gpu.color_offset || s_reg[0x032C / 4] ||
+        (s_gpu.format & 0xF) != 8 || s_gpu.clip_x || s_gpu.clip_y ||
+        !s_gpu.clip_w || !s_gpu.clip_h ||
+        s_gpu.clip_w > NV_ZBUF_W || s_gpu.clip_h > NV_ZBUF_H ||
+        (uint64_t)s_gpu.clip_w * 4 != s_gpu.pitch || bytes > 65536u)
+        return 0;
+    if (type == 2) {
+        if (s_gpu.clip_w != (1u << ((s_gpu.format >> 16) & 0xF)) ||
+            s_gpu.clip_h != (1u << ((s_gpu.format >> 24) & 0xF)))
+            return 0;
+    } else if (type != 1) {
+        return 0;
+    }
+    return !surface_hits_image(dma_resolve(s_gpu.color_offset), (uint32_t)bytes);
+}
+
 /* With the D3D11 translator drawing, the software rasteriser's writes into
  * the title's framebuffer are redundant, and a surface decoded from a
  * misread command lets them land anywhere in guest memory -- the push buffer
@@ -1304,7 +1335,7 @@ static int soft_raster_on(void)
     static int on = -1;
     if (on < 0)
         on = !getenv("RECOMP_PB_D3D11") || getenv("RECOMP_PB_SOFT_RASTER") != NULL;
-    return on;
+    return on || small_capture_surface();
 }
 
 static void clear_surface(uint32_t param)
@@ -2545,8 +2576,6 @@ static void raster_indexed(uint32_t i0, uint32_t i1, uint32_t i2, uint32_t argb)
 /* Depth buffers, host-side, one per zeta surface the title uses. The real one
  * lives in guest memory in a tiled format nothing here decodes, and nothing
  * the title does reads it back, so a float buffer per zeta offset is enough. */
-#define NV_ZBUF_W 1280   /* 640x480 at 2x2 anti-aliasing */
-#define NV_ZBUF_H 1024
 static struct { uint32_t offset; float *z; } s_zbufs[4];
 static int s_ftrace;            /* frame trace: 0 idle, 2 tracing, 3 done */
 static int s_zbuf_next;

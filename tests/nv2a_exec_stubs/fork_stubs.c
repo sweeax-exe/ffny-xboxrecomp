@@ -46,6 +46,7 @@ void pgraph_d3d11_draw_ready(uint32_t nv2a_prim_mode, const PgraphReadyVertex *v
 void pgraph_d3d11_frame_end(void) {}
 int pgraph_d3d11_method(int subchannel, uint32_t method, uint32_t param)
 { (void)subchannel; (void)method; (void)param; return 0; }
+void pgraph_d3d11_count_methods(uint32_t n) { (void)n; }
 int pgraph_d3d11_program_usable(void) { return 0; }
 int pgraph_d3d11_replace_texture_ready(uint32_t guest_addr, const void *data, uint32_t width,
                                        uint32_t height, uint32_t nv2a_format)

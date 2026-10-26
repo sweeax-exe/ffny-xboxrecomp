@@ -2061,8 +2061,15 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                                   / (double)s_freq.QuadPart;
                 }
                 s_probe_waiting = 0;
-                at = nv2a_pb_run(XBOX_CONTIG_BASE | s_run_pos,
-                                 XBOX_CONTIG_BASE | p, &stalled);
+                {
+                    /* RECOMP_PRESENT_PACING: the executor's own time, so the
+                     * rest of a frame reads as waiting for the title. */
+                    extern void nv2a_pb_exec_run_mark(int begin);
+                    nv2a_pb_exec_run_mark(1);
+                    at = nv2a_pb_run(XBOX_CONTIG_BASE | s_run_pos,
+                                     XBOX_CONTIG_BASE | p, &stalled);
+                    nv2a_pb_exec_run_mark(0);
+                }
                 /* At PUT with nothing more to read, what was held back for the
                  * prefetch model takes effect. */
                 xbox_Nv2aReleasePump(!stalled && (at & 0x0FFFFFFFu) == p);

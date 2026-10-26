@@ -48,6 +48,7 @@
 #endif
 #include "../nv2a/nv2a_pgraph_d3d11.h"   /* the D3D11 translator this feeds */
 #include "nv2a_vsh_cpu.h"                 /* shared vertex-program HLSL adapter */
+#include "../nv2a/ready_texture_sig.h"   /* dense_sig64, for pal_tex_sig */
 
 extern ptrdiff_t xbox_GetMemoryOffset(void);
 extern void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch);
@@ -622,6 +623,130 @@ static uint32_t s_cmb_fc[2];
 static volatile LONG s_flip_hz_override;
 void xbox_Nv2aSetFlipHz(int hz) { InterlockedExchange(&s_flip_hz_override, hz > 0 ? hz : 0); }
 
+/* RECOMP_PRESENT_PACING=1: where the executor's time goes, per frame. A frame
+ * runs from one FLIP_STALL to the next. "batch" is draw_primitive (all of it),
+ * "gather" the GPU path's attribute fetch inside it, "draw" the renderer calls
+ * inside it, "sleep" flip_pace, "present" the host's frame end; "other" is the
+ * rest (method decode, state, waiting for the title). A frame with less than
+ * 0.5 ms of sleep had no headroom: the executor, not the 60 Hz timer, set its
+ * length, and the title's clock (which follows flips) slowed with it. */
+static int s_et_on = -1;
+static LONGLONG s_et_freq, s_et_batch, s_et_gather, s_et_draw, s_et_last_flip, s_et_run, s_et_run_t0;
+static unsigned s_et_batches, s_et_gverts, s_et_words[4];
+/* Around each nv2a_pb_run, from the GPU thread's loop: the executor's own time.
+ * The rest of a frame it waited for the title to submit. */
+static LONGLONG et_now(void);
+void nv2a_pb_exec_run_mark(int begin)
+{
+    if (s_et_on <= 0)
+        return;
+    if (begin) {
+        s_et_run_t0 = et_now();
+    } else if (s_et_run_t0) {
+        s_et_run += et_now() - s_et_run_t0;
+        s_et_run_t0 = 0;
+    }
+}
+static int exec_timing_on(void)
+{
+    if (s_et_on < 0) {
+        const char *e = getenv("RECOMP_PRESENT_PACING");
+        LARGE_INTEGER f;
+        QueryPerformanceFrequency(&f);
+        s_et_freq = f.QuadPart;
+        s_et_on = e && *e == '1';
+    }
+    return s_et_on;
+}
+static LONGLONG et_now(void)
+{
+    LARGE_INTEGER q;
+    QueryPerformanceCounter(&q);
+    return q.QuadPart;
+}
+
+#define ET_MAX 256
+static void et_sort(float *v, unsigned n)
+{
+    unsigned i, j;
+    for (i = 1; i < n; i++) {
+        float x = v[i];
+        for (j = i; j > 0 && v[j - 1] > x; j--) v[j] = v[j - 1];
+        v[j] = x;
+    }
+}
+/* One frame's figures, called at the frame's end (after the present). */
+static void exec_timing_frame(LONGLONG flip_at, LONGLONG sleep, LONGLONG present)
+{
+    static float f_int[ET_MAX], f_batch[ET_MAX], f_gather[ET_MAX], f_draw[ET_MAX];
+    static float f_sleep[ET_MAX], f_present[ET_MAX], f_other[ET_MAX], f_busy[ET_MAX];
+    static float f_nb[ET_MAX], f_gv[ET_MAX], f_wait[ET_MAX];
+    static double words[4];
+    LONGLONG run_in = s_et_run + (s_et_run_t0 ? flip_at - s_et_run_t0 : 0);
+    s_et_run = 0;
+    if (s_et_run_t0)
+        s_et_run_t0 = flip_at;
+    static unsigned n, saturated;
+    static LONGLONG window;
+    double ms = 1000.0 / (double)s_et_freq;
+    if (s_et_last_flip && n < ET_MAX) {
+        double interval = (double)(flip_at - s_et_last_flip) * ms;
+        double b = (double)s_et_batch * ms, sl = (double)sleep * ms, pr = (double)present * ms;
+        f_int[n] = (float)interval;
+        f_batch[n] = (float)b;
+        f_gather[n] = (float)((double)s_et_gather * ms);
+        f_draw[n] = (float)((double)s_et_draw * ms);
+        f_sleep[n] = (float)sl;
+        f_present[n] = (float)pr;
+        f_other[n] = (float)(interval - b - sl - pr);
+        f_busy[n] = (float)(interval - sl);
+        f_nb[n] = (float)s_et_batches;
+        f_gv[n] = (float)s_et_gverts;
+        f_wait[n] = (float)(interval - (double)run_in * ms);
+        {
+            unsigned k;
+            for (k = 0; k < 4; k++)
+                words[k] += s_et_words[k];
+        }
+        if (sl < 0.5)
+            saturated++;
+        n++;
+    }
+    s_et_last_flip = flip_at;
+    s_et_batch = s_et_gather = s_et_draw = 0;
+    s_et_batches = s_et_gverts = 0;
+    memset(s_et_words, 0, sizeof s_et_words);
+    if (!window)
+        window = flip_at;
+    if (flip_at - window >= 2 * s_et_freq) {
+        if (n) {
+            float *sets[10] = { f_int, f_busy, f_batch, f_gather, f_draw, f_present, f_other, f_sleep, f_nb, f_gv };
+            float med[10], p95[10], mx[10];
+            unsigned k;
+            for (k = 0; k < 10; k++) {
+                et_sort(sets[k], n);
+                med[k] = sets[k][n / 2];
+                p95[k] = sets[k][(n * 95) / 100];
+                mx[k] = sets[k][n - 1];
+            }
+            fprintf(stderr, "[EXECTIME] %u frames, %u with no sleep left: interval %.2f/%.2f/%.2f, busy %.2f/%.2f/%.2f, "
+                            "batch %.2f/%.2f/%.2f (gather %.2f/%.2f, draw %.2f/%.2f), present %.2f/%.2f, other %.2f/%.2f ms "
+                            "(median/p95[/max]); sleep median %.2f min %.2f ms; %.0f batches, %.0f gathered vertices a frame%c",
+                    n, saturated, med[0], p95[0], mx[0], med[1], p95[1], mx[1], med[2], p95[2], mx[2],
+                    med[3], p95[3], med[4], p95[4], med[5], p95[5], med[6], p95[6], med[7], sets[7][0],
+                    med[8], med[9], 10);
+            et_sort(f_wait, n);
+            fprintf(stderr, "[EXECTIME] waiting for the title %.2f/%.2f/%.2f ms (median/p95/max); words a frame: "
+                            "%.0f transform constants, %.0f transform program, %.0f vertex/index, %.0f other%c",
+                    f_wait[n / 2], f_wait[(n * 95) / 100], f_wait[n - 1],
+                    words[0] / n, words[1] / n, words[2] / n, words[3] / n, 10);
+        }
+        memset(words, 0, sizeof words);
+        n = saturated = 0;
+        window = flip_at;
+    }
+}
+
 static void flip_pace(void)
 {
     static int env_hz = -1;
@@ -645,8 +770,33 @@ static void flip_pace(void)
     if (next.QuadPart && now.QuadPart < next.QuadPart) {
         LONGLONG left_ms = (next.QuadPart - now.QuadPart) * 1000 / freq.QuadPart;
 #if defined(_WIN32)
-        if (left_ms > 2)
+        /* A high-resolution waitable timer to 0.5 ms before the deadline, then
+         * the spin below. Sleep() is only as fine as the process's timer
+         * resolution: at Windows' default 15.6 ms (no timeBeginPeriod, as in a
+         * scripted run with host input off, or under power throttling, #93)
+         * Sleep(3) woke up to 15 ms late and a Story fight's frame intervals
+         * reached 19-20 ms at the 95th percentile with the executor done in
+         * time. RECOMP_PACE_TIMER=0 goes back to Sleep. */
+        static HANDLE pace_timer;
+        static int pace_tried;
+        if (!pace_tried) {
+            const char *e = getenv("RECOMP_PACE_TIMER");
+            pace_tried = 1;
+            if (!(e && *e == '0'))
+                pace_timer = CreateWaitableTimerExW(NULL, NULL, 0x00000002 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */,
+                                                    TIMER_ALL_ACCESS);
+        }
+        if (pace_timer) {
+            LONGLONG left_100ns = (next.QuadPart - now.QuadPart) * 10000000LL / freq.QuadPart - 5000;
+            if (left_100ns > 0) {
+                LARGE_INTEGER due;
+                due.QuadPart = -left_100ns;           /* relative */
+                if (SetWaitableTimer(pace_timer, &due, 0, NULL, NULL, FALSE))
+                    WaitForSingleObject(pace_timer, INFINITE);
+            }
+        } else if (left_ms > 2) {
             Sleep((DWORD)(left_ms - 1));
+        }
 #else
         /* Sleep to within 0.3 ms of the deadline and spin only for that: the old 1 to 2 ms of
          * spinning was a core at full tilt for a tenth of every frame, on a chip whose
@@ -794,6 +944,119 @@ static int fetch_attr(const VertexAttr *a, uint32_t index, float out[4])
     }
     default:
         return 0;
+    }
+}
+
+/* The GPU path's vertex gather, prepared once per batch (RECOMP_GATHER_PLAN=0
+ * turns it off): what fetch_attr re-derives for every attribute of every
+ * vertex -- the bounds rule, the element size, the format switch, and for an
+ * attribute with no array the immediate value -- is worked out once, and each
+ * vertex costs an address check and a conversion. Any vertex the fast check
+ * does not clear goes through fetch_attr, so results are the same: 2.2 ms of
+ * a Story fight's frame was this gather (63,000 vertices). */
+typedef struct {
+    int      slot;           /* attribute index */
+    int      absent;         /* no array, or a type fetch_attr does not read */
+    uint32_t type, size, stride, offset, elem;
+    float    cur[4];         /* the immediate value, for an absent attribute */
+} GatherAttr;
+
+static int gather_plan_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("RECOMP_GATHER_PLAN");
+        on = !(e && *e == '0');
+    }
+    return on;
+}
+
+static uint32_t gather_prepare(uint32_t used, GatherAttr *plan)
+{
+    uint32_t a, n = 0;
+    for (a = 0; a < 16; a++) {
+        const VertexAttr *va = &s_gpu.attr[a];
+        GatherAttr *g;
+        if (!((used >> a) & 1))
+            continue;
+        g = &plan[n++];
+        g->slot = (int)a;
+        g->type = va->type;
+        g->size = va->size < 4 ? va->size : 4;
+        g->stride = va->stride;
+        g->offset = va->offset;
+        g->elem = attr_elem_bytes(va);
+        g->absent = !va->size || !va->stride || (va->type > 6 || va->type == 3);
+        if (g->absent)
+            nv2a_vsh_current((int)a, g->cur);
+    }
+    return n;
+}
+
+/* One vertex into dst (4 floats per planned attribute), as the fetch_attr loop
+ * would write it. */
+static void gather_vertex(const GatherAttr *plan, uint32_t n, uint32_t vi, float *dst)
+{
+    const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
+    uint32_t k, i;
+    for (k = 0; k < n; k++, dst += 4) {
+        const GatherAttr *g = &plan[k];
+        const uint8_t *p;
+        if (g->absent) {
+            memcpy(dst, g->cur, 16);
+            continue;
+        }
+        if (s_gpu.inline_active) {
+            size_t at = (size_t)g->offset + (size_t)vi * g->stride;
+            if (at + 4 > (size_t)s_gpu.inline_count * 4)
+                goto slow;
+            p = (const uint8_t *)s_gpu.inline_buf + at;
+        } else {
+            uint64_t at = (uint64_t)g->offset + (uint64_t)vi * g->stride, end = at + g->elem;
+            if (!g->offset || at < 0x1000u
+                    || !(end <= (uint64_t)XBOX_CONTIG_SIZE
+                         || (at >= XBOX_CONTIG_BASE
+                             && end <= (uint64_t)XBOX_CONTIG_BASE + XBOX_CONTIG_SIZE)))
+                goto slow;
+            p = mem + at;
+        }
+        dst[0] = dst[1] = dst[2] = 0.0f;
+        dst[3] = 1.0f;
+        switch (g->type) {
+        case 0:
+            dst[0] = (float)p[2] / 255.0f;
+            dst[1] = (float)p[1] / 255.0f;
+            dst[2] = (float)p[0] / 255.0f;
+            dst[3] = (float)p[3] / 255.0f;
+            break;
+        case 2:
+            for (i = 0; i < g->size; i++)
+                dst[i] = ((const float *)p)[i];
+            break;
+        case 4:
+            for (i = 0; i < g->size; i++)
+                dst[i] = (float)p[i] / 255.0f;
+            break;
+        case 1:
+            for (i = 0; i < g->size; i++)
+                dst[i] = (float)((const int16_t *)p)[i] / 32767.0f;
+            break;
+        case 5:
+            for (i = 0; i < g->size; i++)
+                dst[i] = (float)((const int16_t *)p)[i];
+            break;
+        case 6: {
+            uint32_t v = *(const uint32_t *)p;
+            dst[0] = (float)((int32_t)(v << 21) >> 21) / 1023.0f;
+            dst[1] = (float)((int32_t)(v << 10) >> 21) / 1023.0f;
+            dst[2] = (float)((int32_t)v >> 22) / 511.0f;
+            break;
+        }
+        }
+        continue;
+slow:
+        if (!fetch_attr(&s_gpu.attr[g->slot], vi, dst))
+            nv2a_vsh_current(g->slot, dst);
     }
 }
 
@@ -3712,6 +3975,14 @@ static uint32_t pal_tex_sig(const uint8_t *idx, uint32_t n,
     const uint32_t *w = (const uint32_t *)idx;
     uint32_t words = n / 4, step = n <= 65536 ? 1 : 17, i;
     uint32_t h = 2166136261u;
+    if (step == 1 && sig_fast_on()) {
+        /* The same words, in four lanes (dense_sig64), then the palette. */
+        uint64_t d = dense_sig64(idx, (size_t)words * 4, 1469598103934665603ull);
+        h = (uint32_t)(d ^ (d >> 32));
+        for (i = 0; i < pal_len; i++)
+            h = (h ^ pal[i]) * 16777619u;
+        return h;
+    }
     for (i = 0; i < words; i += step)
         h = (h ^ w[i]) * 16777619u;
     for (i = 0; i < pal_len; i++)
@@ -4069,7 +4340,21 @@ static void bind_extra_stages(int with_coords)
     }
 }
 
+static void draw_primitive_body(void);
+/* The batch, timed for RECOMP_PRESENT_PACING (exec_timing_frame). */
 static void draw_primitive(void)
+{
+    if (exec_timing_on()) {
+        LONGLONG t0 = et_now();
+        draw_primitive_body();
+        s_et_batch += et_now() - t0;
+        s_et_batches++;
+        return;
+    }
+    draw_primitive_body();
+}
+
+static void draw_primitive_body(void)
 {
     float v[4];
     uint32_t i;
@@ -4264,6 +4549,10 @@ static void draw_primitive(void)
                 static uint16_t gm_val[VC_SIZE];
                 static uint16_t lidx[NV_MAX_INDICES];
                 uint32_t k, cnt = s_gpu.idx_count < NV_MAX_INDICES ? s_gpu.idx_count : NV_MAX_INDICES;
+                LONGLONG et_g0 = s_et_on > 0 ? et_now() : 0;
+                GatherAttr plan[16];
+                uint32_t nplan = gather_plan_on() ? gather_prepare(used, plan) : 0;
+                int planned = gather_plan_on();
                 if (++gm_cur == 0) {
                     memset(gm_gen, 0, sizeof(gm_gen));
                     gm_cur = 1;
@@ -4274,7 +4563,14 @@ static void draw_primitive(void)
                         lidx[k] = gm_val[slot];
                         continue;
                     }
-                    {
+                    if (planned) {
+                        /* Written at its packed place: the stride the pack
+                         * below would move it to. */
+                        float *dst = gv + (size_t)gnv * (nplan ? nplan : 1) * 4;
+                        gather_vertex(plan, nplan, vi, dst);
+                        if (!used)
+                            dst[0] = dst[1] = dst[2] = 0.0f, dst[3] = 1.0f;
+                    } else {
                         float *dst = gv + (size_t)gnv * 64;
                         uint32_t o = 0;
                         for (a = 0; a < 16; a++) {
@@ -4300,7 +4596,7 @@ static void draw_primitive(void)
                         per += (used >> k) & 1;
                     if (!per)
                         per = 1;
-                    for (v2 = 1; v2 < gnv; v2++)
+                    for (v2 = 1; !planned && v2 < gnv; v2++)
                         memmove(gv + (size_t)v2 * per * 4, gv + (size_t)v2 * 64, per * 16);
                 }
                 /* Every primitive as a triangle list. Nothing is culled, so
@@ -4340,6 +4636,10 @@ static void draw_primitive(void)
                     break;
                 default:
                     break;
+                }
+                if (s_et_on > 0) {
+                    s_et_gather += et_now() - et_g0;
+                    s_et_gverts += gnv;
                 }
                 if (s_gpu.texs[0].valid && !tex_size_from_format(s_gpu.texs[0].color)
                         && s_gpu.texs[0].width && s_gpu.texs[0].height) {
@@ -4619,15 +4919,20 @@ static void draw_primitive(void)
                 }
                 if (n >= 3)
                     ws_place_batch(vsh, used, gpu ? NULL : ready, n);
-                if (n >= 3 && gpu) {
-                    pgraph_d3d11_set_point_mode(s_gpu.prim == 1, s_point_size);
-                    (void)pgraph_d3d11_draw_program(gv, gnv, used, gtri, gnt, gsu, gsv);
-                    pgraph_d3d11_set_point_mode(0, 0.0f);
+                {
+                    LONGLONG et_d0 = s_et_on > 0 ? et_now() : 0;
+                    if (n >= 3 && gpu) {
+                        pgraph_d3d11_set_point_mode(s_gpu.prim == 1, s_point_size);
+                        (void)pgraph_d3d11_draw_program(gv, gnv, used, gtri, gnt, gsu, gsv);
+                        pgraph_d3d11_set_point_mode(0, 0.0f);
+                    }
+                    else if (n >= 3)
+                        pgraph_d3d11_draw_ready(s_gpu.prim, ready, n);
+                    if (n >= 3)
+                        ws_wide_sides(gpu, gv, gnv, used, gtri, gnt, gsu, gsv, ready, n);
+                    if (s_et_on > 0)
+                        s_et_draw += et_now() - et_d0;
                 }
-                else if (n >= 3)
-                    pgraph_d3d11_draw_ready(s_gpu.prim, ready, n);
-                if (n >= 3)
-                    ws_wide_sides(gpu, gv, gnv, used, gtri, gnt, gsu, gsv, ready, n);
             }
             {
                 /* Which attribute slots the title actually populated. Texture
@@ -5114,9 +5419,50 @@ static void flip_hold_report(void)
     h->held_ns = 0;
 }
 
+/* One TRANSFORM_CONSTANT word (subchannel 0, 0x0B80..0x0BFC), without the
+ * dispatch: the register file, the translator's method count and the constant
+ * store are all nv2a_pb_exec_method does with one. A fight sends about 200,000
+ * of them a frame (bone matrices), about 70% of its words, and the general
+ * dispatch was the largest part of the executor's time. Returns 0 when the
+ * caller must use nv2a_pb_exec_method (before its first call, or with
+ * RECOMP_PB_CONST_FAST=0). */
+static int s_exec_inited;
+int nv2a_pb_exec_constant_word(uint32_t method, uint32_t param)
+{
+    static int fast = -1, fwd = -1;
+    if (fast < 0) {
+        const char *e = getenv("RECOMP_PB_CONST_FAST");
+        fast = !(e && *e == '0');
+        fwd = getenv("RECOMP_PB_D3D11") != NULL;
+    }
+    if (!fast || !s_exec_inited)
+        return 0;
+    if (s_et_on > 0)
+        s_et_words[0]++;
+    s_reg[(method & 0x1FFCu) / 4] = param;
+    if (fwd) {
+        extern void pgraph_d3d11_count_methods(uint32_t n);
+        pgraph_d3d11_count_methods(1);
+    }
+    nv2a_vsh_constant_word(param);
+    return 1;
+}
+
 void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
 {
     static int inited;
+
+    if (s_et_on > 0) {
+        /* RECOMP_PRESENT_PACING: words per frame by kind (exec_timing_frame). */
+        if (method >= 0x0B80 && method < 0x0C00)
+            s_et_words[0]++;                    /* transform constants */
+        else if (method >= 0x0B00 && method < 0x0B80)
+            s_et_words[1]++;                    /* transform program */
+        else if (method >= 0x1800 && method < 0x1B00)
+            s_et_words[2]++;                    /* indices, inline vertices, vertex data */
+        else
+            s_et_words[3]++;
+    }
 
     /* BACK_END_WRITE_SEMAPHORE_RELEASE. The title's pointer already names the
      * semaphore word; SET_SEMAPHORE_OFFSET is not added (in X-Men Legends it
@@ -5128,6 +5474,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
     }
     if (!inited) {
         inited = 1;
+        s_exec_inited = 1;
         s_gpu.aa_sx = s_gpu.aa_sy = 1.0f;
         /* Stencil state as the hardware resets it: GL_ALWAYS, masks 0xFF,
          * GL_KEEP, until the title says otherwise. */
@@ -5515,6 +5862,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
         uint64_t stall_ns = xbox_HostNowNs();
         int clock_ok;
         uint32_t stall_vbl;
+        LONGLONG et_flip = exec_timing_on() ? et_now() : 0, et_sleep = 0, et_present = 0;
         (void)flip_clock(stall_ns, &clock_ok);
         stall_vbl = s_walk_vbl;
         if (s_ftrace == 2)
@@ -5545,7 +5893,13 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
             }
         }
 #endif
-        flip_pace();
+        if (et_flip) {
+            LONGLONG t0 = et_now();
+            flip_pace();
+            et_sleep = et_now() - t0;
+        } else {
+            flip_pace();
+        }
         s_gpu.flip_read = s_gpu.flip_write;
         /* And this is a completed swap, which is what a title's own swap
          * counter counts -- see xbox_Nv2aFrameCounterFlip. */
@@ -5608,9 +5962,14 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
                 fwd = getenv("RECOMP_PB_D3D11") != NULL;
             if (fwd) {
                 /* The host owns the swap chain, so it presents. */
+                LONGLONG t0 = et_flip ? et_now() : 0;
                 pgraph_d3d11_frame_end();
+                if (et_flip)
+                    et_present = et_now() - t0;
             }
         }
+        if (et_flip)
+            exec_timing_frame(et_flip, et_sleep, et_present);
         if (pb_exec_verbose()) {
             static unsigned n;
             if (n++ < 8) {

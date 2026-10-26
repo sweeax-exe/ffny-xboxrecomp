@@ -36,6 +36,7 @@
 #include "d3d8_internal.h"
 #endif
 #include "d3d8_combiners.h"
+#include "../nv2a/ready_texture_sig.h"   /* dense_sig64 */
 #if defined(_WIN32)
 #include <d3dcompiler.h>
 #endif
@@ -108,6 +109,12 @@ static uint32_t fnv1a_hash(const void *data, size_t len)
 
 static uint32_t combiner_state_hash(const NV2ACombinerState *state)
 {
+    /* Looked up on every draw; only a cache index (entries are compared in
+     * full), so the four-lane hash serves (RECOMP_FAST_SIG=0: byte FNV). */
+    if (sig_fast_on()) {
+        uint64_t d = dense_sig64((const uint8_t *)state, sizeof(NV2ACombinerState), 0x811C9DC5u);
+        return (uint32_t)(d ^ (d >> 32));
+    }
     return fnv1a_hash(state, sizeof(NV2ACombinerState));
 }
 

@@ -1705,6 +1705,14 @@ void pgraph_d3d11_set_chyron_scroll(uint32_t pixels)
     g_pg.chyron_scroll_offset = (float)pixels;
 }
 
+/* Methods the executor handled without forwarding them (its TRANSFORM_CONSTANT
+ * fast path), counted as pgraph_d3d11_method would have counted them. */
+void pgraph_d3d11_count_methods(uint32_t n)
+{
+    if (g_pg.initialized)
+        g_pg.stats.methods_handled += n;
+}
+
 void pgraph_d3d11_get_stats(PgraphD3D11Stats *out)
 {
     if (out) *out = g_pg.stats;

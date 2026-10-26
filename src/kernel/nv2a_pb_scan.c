@@ -48,6 +48,7 @@ static uint32_t s_tot_calls;
 /* Executing is opt-in separately from surveying: a survey is read-only, while
  * the executor writes to guest memory. */
 extern void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param);
+extern int nv2a_pb_exec_constant_word(uint32_t method, uint32_t param);
 extern void nv2a_pb_exec_report(void);
 static int s_exec_enabled = -1;
 static int s_scan_enabled = -1;
@@ -703,9 +704,14 @@ static uint32_t pb_segment(uint32_t va, uint32_t end_va, uint32_t *jump_va)
                 /* Same walk, two consumers: the survey counts, the executor
                  * acts. Keeping them on one decode means they can never
                  * disagree about what the stream said. */
-                if (s_exec_enabled)
-                    nv2a_pb_exec_method(subch, m,
-                                        nv2a_pb_read(va));
+                if (s_exec_enabled) {
+                    uint32_t param = nv2a_pb_read(va);
+                    /* Shader constants, most of a fight's words, skip the
+                     * general dispatch (nv2a_pb_exec_constant_word). */
+                    if (!(subch == 0 && m >= 0x0B80u && m < 0x0C00u
+                          && nv2a_pb_exec_constant_word(m, param)))
+                        nv2a_pb_exec_method(subch, m, param);
+                }
                 va += 4;
                 words++;
             }

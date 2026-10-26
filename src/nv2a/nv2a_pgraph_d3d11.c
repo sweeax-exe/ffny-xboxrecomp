@@ -13,6 +13,7 @@
 
 #include "nv2a_pgraph_d3d11.h"
 #include "nv2a_regs.h"
+#include "ready_texture_sig.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -881,26 +882,10 @@ static uint32_t compressed_size(uint32_t fmt, uint32_t w, uint32_t h)
  * the rest of the movie. Each cached texture is re-read at most once every
  * few milliseconds and uploaded again when its signature changes.
  *
- * ponytail: the signature samples every 61st word (plus the last), which is
- * enough for a decoded video frame and cheap enough to run on every cached
- * texture each frame; a title that patches a few texels of a large atlas in
- * place can slip through it. A full hash, or watching the guest pages for
- * writes, is the upgrade if that ever shows. */
-static uint64_t ready_tex_sig(const void *data, uint32_t bytes)
-{
-    const uint32_t *w = (const uint32_t *)data;
-    uint32_t n = bytes / 4, i;
-    uint64_t h = 1469598103934665603ull;
-    for (i = 0; i < n; i += 61) {
-        h ^= w[i];
-        h *= 1099511628211ull;
-    }
-    if (n) {
-        h ^= w[n - 1];
-        h *= 1099511628211ull;
-    }
-    return h;
-}
+ * Small textures use a complete content signature: sparse sampling misses
+ * localized UI edits, including eye colors in a reused compressed texture.
+ * Large surfaces keep the sampled signature's existing cost/coverage tradeoff.
+ * The implementation is shared with the hardware-free regression fixture. */
 
 UINT d3d8_format_bpp(D3DFORMAT fmt);   /* d3d8_resources.c */
 

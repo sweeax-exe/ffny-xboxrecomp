@@ -2330,7 +2330,19 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                 }
             }
         }
-        if (s_nv2a_trace) {
+        /* Only on an explicit RECOMP_NV2A_TRACE, like the per-kick line:
+         * s_nv2a_trace is also on whenever the executor runs (RECOMP_PB_EXEC),
+         * and this read is trapped -- an access fault and the exception
+         * handler on every pass of this loop, plus a flushed log line on
+         * every flip (a fifth of a normal boot's log), on the thread the
+         * title waits on (known-issues, scene loads, fix 1).
+         * RECOMP_PCRTC_POLL=1 brings the old poll back. */
+        static int pcrtc_poll = -1;
+        if (pcrtc_poll < 0) {
+            const char *e = getenv("RECOMP_PCRTC_POLL");
+            pcrtc_poll = e && *e == '1';
+        }
+        if (s_nv2a_trace_kicks || (pcrtc_poll && s_nv2a_trace)) {
             static uint32_t last_start = 0xFFFFFFFFu;
             uint32_t start = xbox_Nv2aRegRead(0xFD600800u);   /* may be trapped */
             if (start != last_start) {

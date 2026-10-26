@@ -851,10 +851,80 @@ static ID3D11PixelShader *compile_combiner_shader(const NV2ACombinerState *state
         }
     }
 
-    hr = D3DCompile(hlsl, (SIZE_T)len, "ps_combiner",
-                    NULL, NULL, "main", "ps_5_0",
-                    D3DCOMPILE_OPTIMIZATION_LEVEL3, 0,
-                    &code, &errors);
+    /* One compiled shader per HLSL text. The state cache above is keyed by the
+     * whole NV2ACombinerState, constant colours included, but the text reads
+     * those from the constant buffer: every new constant colour was another
+     * D3DCompile (O3) of a text already compiled -- 212 states for 10 texts in
+     * a Mac trace of one scene -- and on Windows each one is a stall during
+     * play. The text table keeps its own reference, so the state cache's LRU
+     * eviction cannot release a shader it shares. RECOMP_PS_TEXT_CACHE=0
+     * compiles every state as before. [D3D11CACHE] counts both. */
+    {
+        enum { TEXT_MAX = 256 };
+        static struct { uint64_t h; int len; char *text; ID3D11PixelShader *ps; } texts[TEXT_MAX];
+        static int ntexts, on = -1;
+        static unsigned compiles, reuses;
+        static double compile_ms;
+        uint64_t h = 0;
+        int k;
+        if (on < 0) {
+            const char *e = getenv("RECOMP_PS_TEXT_CACHE");
+            on = !(e && *e == '0');
+        }
+        if (on) {
+            h = dense_sig64((const uint8_t *)hlsl, (size_t)len, 0x9E3779B97F4A7C15ull);
+            for (k = 0; k < ntexts; k++) {
+                if (texts[k].h == h && texts[k].len == len && !memcmp(texts[k].text, hlsl, (size_t)len)) {
+                    ID3D11PixelShader_AddRef(texts[k].ps);
+                    reuses++;
+                    if ((reuses & (reuses - 1)) == 0)
+                        fprintf(stderr, "[D3D11CACHE] pixel shaders: %u compiles (%.1f ms), %u reuses of a compiled text%c",
+                                compiles, compile_ms, reuses, 10);
+                    return texts[k].ps;
+                }
+            }
+        }
+        {
+            LARGE_INTEGER f, t0, t1;
+            QueryPerformanceFrequency(&f);
+            QueryPerformanceCounter(&t0);
+            hr = D3DCompile(hlsl, (SIZE_T)len, "ps_combiner",
+                            NULL, NULL, "main", "ps_5_0",
+                            D3DCOMPILE_OPTIMIZATION_LEVEL3, 0,
+                            &code, &errors);
+            if (SUCCEEDED(hr)) {
+                hr = ID3D11Device_CreatePixelShader(d3d8_GetD3D11Device(),
+                                                    ID3D10Blob_GetBufferPointer(code),
+                                                    ID3D10Blob_GetBufferSize(code), NULL, &ps);
+                ID3D10Blob_Release(code);
+                code = NULL;
+                if (FAILED(hr)) {
+                    fprintf(stderr, "NV2A combiners: CreatePixelShader failed: 0x%08lX\n", hr);
+                    if (errors) ID3D10Blob_Release(errors);
+                    return NULL;
+                }
+                QueryPerformanceCounter(&t1);
+                compiles++;
+                compile_ms += (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)f.QuadPart;
+                fprintf(stderr, "[D3D11CACHE] pixel shaders: %u compiles (%.1f ms), %u reuses of a compiled text%c",
+                        compiles, compile_ms, reuses, 10);
+                if (on && ntexts < TEXT_MAX) {
+                    char *copy = (char *)malloc((size_t)len);
+                    if (copy) {
+                        memcpy(copy, hlsl, (size_t)len);
+                        texts[ntexts].h = h;
+                        texts[ntexts].len = len;
+                        texts[ntexts].text = copy;
+                        texts[ntexts].ps = ps;
+                        ID3D11PixelShader_AddRef(ps);
+                        ntexts++;
+                    }
+                }
+                if (errors) ID3D10Blob_Release(errors);
+                return ps;
+            }
+        }
+    }
     if (FAILED(hr)) {
         fprintf(stderr, "NV2A combiners: HLSL compile failed: %s\n",
                 errors ? (char *)ID3D10Blob_GetBufferPointer(errors)

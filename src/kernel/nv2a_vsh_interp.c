@@ -364,7 +364,221 @@ static vec4 run_ilu(uint32_t op, vec4 c)
     return r;
 }
 
+/* ---- the same execution from decoded instructions ------------------------ *
+ *
+ * nv2a_vsh_run below reads every field of every instruction with field() for
+ * each vertex. A fight runs it for at least one vertex of every batch
+ * (widescreen placement), and that decoding was the largest single part of
+ * the executor's time after #109's other changes. These are the same
+ * instructions decoded once per program revision, executed with the same
+ * read, write and output rules and the same run_mac/run_ilu arithmetic, so
+ * results are identical. RECOMP_VSH_DECODED=0 runs the field() loop;
+ * RECOMP_VSH_CHECK=1 runs both and reports the first outputs that differ. */
+typedef struct {
+    uint8_t mux, reg, neg, rel, inreg;
+    uint8_t sw[4];
+    uint16_t c;
+} DecSrc;
+typedef struct {
+    uint8_t mac, ilu, mac_mask, ilu_mask, tdst, omask, to_o, from_ilu, final;
+    uint16_t oaddr;
+    DecSrc src[3];
+} DecIns;
+
+static DecIns   s_dec[NV2A_VSH_SLOTS];
+static uint32_t s_dec_rev;
+static int      s_dec_ok;
+
+static void dec_src(const uint32_t *ins, int which, DecSrc *d)
+{
+    uint32_t swz;
+    if (which == 0) {
+        d->neg = (uint8_t)field(ins, 1, 8, 1); swz = field(ins, 1, 0, 8);
+        d->mux = (uint8_t)field(ins, 2, 26, 2); d->reg = (uint8_t)field(ins, 2, 28, 4);
+    } else if (which == 1) {
+        d->neg = (uint8_t)field(ins, 2, 25, 1); swz = field(ins, 2, 17, 8);
+        d->mux = (uint8_t)field(ins, 2, 11, 2); d->reg = (uint8_t)field(ins, 2, 13, 4);
+    } else {
+        d->neg = (uint8_t)field(ins, 2, 10, 1); swz = field(ins, 2, 2, 8);
+        d->mux = (uint8_t)field(ins, 3, 28, 2);
+        d->reg = (uint8_t)((field(ins, 2, 0, 2) << 2) | field(ins, 3, 30, 2));
+    }
+    d->sw[0] = (uint8_t)((swz >> 6) & 3);
+    d->sw[1] = (uint8_t)((swz >> 4) & 3);
+    d->sw[2] = (uint8_t)((swz >> 2) & 3);
+    d->sw[3] = (uint8_t)(swz & 3);
+    d->inreg = (uint8_t)field(ins, 1, 9, 4);
+    d->c = (uint16_t)field(ins, 1, 13, 8);
+    d->rel = (uint8_t)field(ins, 3, 1, 1);
+}
+
+static void dec_program(void)
+{
+    uint32_t s;
+    for (s = 0; s < NV2A_VSH_SLOTS; s++) {
+        const uint32_t *ins = s_program[s];
+        DecIns *d = &s_dec[s];
+        int k;
+        d->mac = (uint8_t)field(ins, 1, 21, 4);
+        d->ilu = (uint8_t)field(ins, 1, 25, 3);
+        d->mac_mask = (uint8_t)field(ins, 3, 24, 4);
+        d->ilu_mask = (uint8_t)field(ins, 3, 16, 4);
+        d->tdst = (uint8_t)field(ins, 3, 20, 4);
+        d->omask = (uint8_t)field(ins, 3, 12, 4);
+        d->oaddr = (uint16_t)field(ins, 3, 3, 8);
+        d->to_o = (uint8_t)field(ins, 3, 11, 1);
+        d->from_ilu = (uint8_t)field(ins, 3, 2, 1);
+        d->final = (uint8_t)field(ins, 3, 0, 1);
+        for (k = 0; k < 3; k++)
+            dec_src(ins, k, &d->src[k]);
+    }
+    s_dec_rev = s_program_revision;
+    s_dec_ok = 1;
+}
+
+static vec4 dec_read(const DecSrc *d, const float in[NV2A_VSH_INPUTS][4],
+                     const vec4 *temp, const vec4 *opos, int a0)
+{
+    const float *s;
+    vec4 r;
+    if (d->mux == 1)
+        s = (d->reg == 12) ? opos->v : (d->reg < 12 ? temp[d->reg].v : temp[0].v);
+    else if (d->mux == 2)
+        s = in[d->inreg];
+    else {
+        int ci = (int)d->c;
+        if (d->rel)
+            ci += a0;
+        if (ci < 0 || ci >= NV2A_VSH_CONSTANTS)
+            ci = 0;
+        s = s_const[ci];
+    }
+    r.v[0] = s[d->sw[0]];
+    r.v[1] = s[d->sw[1]];
+    r.v[2] = s[d->sw[2]];
+    r.v[3] = s[d->sw[3]];
+    if (d->neg) {
+        r.v[0] = -r.v[0]; r.v[1] = -r.v[1];
+        r.v[2] = -r.v[2]; r.v[3] = -r.v[3];
+    }
+    return r;
+}
+
+static void vsh_finish(Nv2aVshOutput *out, const vec4 *opos, float outregs[13][4])
+{
+    memcpy(out->pos, opos->v, sizeof out->pos);
+    for (int k = 0; k < 4; k++) {
+        float c0 = outregs[3][k], c1 = outregs[4][k];
+        out->d0[k] = c0 > 1.0f ? 1.0f : (c0 >= 0.0f ? c0 : 0.0f);
+        out->d1[k] = c1 > 1.0f ? 1.0f : (c1 >= 0.0f ? c1 : 0.0f);
+    }
+    memcpy(out->fog, outregs[5], sizeof out->fog);
+    memcpy(out->tex[0], outregs[9], sizeof out->tex[0]);
+    memcpy(out->tex[1], outregs[10], sizeof out->tex[1]);
+    memcpy(out->tex[2], outregs[11], sizeof out->tex[2]);
+    memcpy(out->tex[3], outregs[12], sizeof out->tex[3]);
+}
+
+static int vsh_run_decoded(const float in[NV2A_VSH_INPUTS][4], Nv2aVshOutput *out)
+{
+    vec4 temp[12], opos;
+    float outregs[13][4];
+    int a0 = 0;
+    uint32_t s;
+
+    if (!s_dec_ok || s_dec_rev != s_program_revision)
+        dec_program();
+    memset(temp, 0, sizeof temp);
+    memset(&opos, 0, sizeof opos);
+    memset(outregs, 0, sizeof outregs);
+    outregs[3][3] = outregs[4][3] = 1.0f;
+    outregs[9][3] = outregs[10][3] = outregs[11][3] = outregs[12][3] = 1.0f;
+
+    for (s = s_start_slot; s < NV2A_VSH_SLOTS; s++) {
+        const DecIns *d = &s_dec[s];
+        vec4 a = dec_read(&d->src[0], in, temp, &opos, a0);
+        vec4 b = dec_read(&d->src[1], in, temp, &opos, a0);
+        vec4 c = dec_read(&d->src[2], in, temp, &opos, a0);
+        vec4 mres = {{0, 0, 0, 0}}, ires = {{0, 0, 0, 0}};
+
+        if (d->mac)
+            mres = run_mac(d->mac, a, b, c, &a0);
+        if (d->ilu)
+            ires = run_ilu(d->ilu, c);
+        if (d->mac && d->mac != 13 && d->mac_mask) {
+            float *dst = d->tdst == 12 ? opos.v : (d->tdst < 12 ? temp[d->tdst].v : NULL);
+            if (dst) write_masked(dst, &mres, d->mac_mask);
+        }
+        if (d->ilu && d->ilu_mask) {
+            uint32_t it = d->mac ? 1u : d->tdst;
+            float *dst = it == 12 ? opos.v : (it < 12 ? temp[it].v : NULL);
+            if (dst) write_masked(dst, &ires, d->ilu_mask);
+        }
+        if (d->omask) {
+            const vec4 *src = d->from_ilu ? &ires : &mres;
+            if (!d->to_o) {
+                if (s_cxt_write && d->oaddr < NV2A_VSH_CONSTANTS) {
+                    write_masked(s_const[d->oaddr], src, d->omask);
+                    ++s_constant_version;
+                }
+            } else if (d->oaddr == 0) {
+                write_masked(opos.v, src, d->omask);
+            } else if (d->oaddr < 13) {
+                write_masked(outregs[d->oaddr], src, d->omask);
+            }
+        }
+        if (d->final) {
+            vsh_finish(out, &opos, outregs);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int vsh_run_fields(const float in[NV2A_VSH_INPUTS][4], Nv2aVshOutput *out);
+
 int nv2a_vsh_run(const float in[NV2A_VSH_INPUTS][4], Nv2aVshOutput *out)
+{
+    static int mode = -1;            /* 0 fields, 1 decoded, 2 both and compare */
+    if (mode < 0) {
+        const char *e = getenv("RECOMP_VSH_DECODED"), *c = getenv("RECOMP_VSH_CHECK");
+        mode = (e && *e == '0') ? 0 : 1;
+        if (c && *c == '1')
+            mode = 2;
+        /* The trace and the disassembly live in the field() loop. */
+        if (getenv("RECOMP_VSH_TRACE") || getenv("RECOMP_VSH_DUMP"))
+            mode = 0;
+    }
+    if (mode == 1 && s_trace_left <= 0)
+        return vsh_run_decoded(in, out);
+    if (mode == 2 && s_trace_left <= 0) {
+        /* Constant writes would happen twice: compare only programs that make none. */
+        Nv2aVshOutput ref;
+        uint32_t ver = s_constant_version;
+        int r1 = vsh_run_fields(in, &ref), r2;
+        if (s_constant_version != ver)
+            return r1 ? (*out = ref, 1) : 0;
+        r2 = vsh_run_decoded(in, out);
+        if (r1 != r2 || (r1 && memcmp(&ref, out, sizeof ref) != 0)) {
+            static unsigned told;
+            if (told++ < 16)
+                fprintf(stderr, "[VSH-CHECK] decoded run differs (fields %d, decoded %d): pos %g %g %g %g vs %g %g %g %g%c",
+                        r1, r2, ref.pos[0], ref.pos[1], ref.pos[2], ref.pos[3],
+                        out->pos[0], out->pos[1], out->pos[2], out->pos[3], 10);
+            *out = ref;
+            return r1;
+        }
+        {
+            static unsigned long long checked;
+            if ((++checked & (checked - 1)) == 0 && checked >= 1024)
+                fprintf(stderr, "[VSH-CHECK] %llu runs identical%c", checked, 10);
+        }
+        return r2;
+    }
+    return vsh_run_fields(in, out);
+}
+
+static int vsh_run_fields(const float in[NV2A_VSH_INPUTS][4], Nv2aVshOutput *out)
 {
     static int dump = -1;
     static uint32_t dumped[16];

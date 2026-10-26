@@ -811,6 +811,8 @@ static volatile float s_ws_k = 1.0f, s_ws_reach = 1.0f;
 static volatile int s_ws_side_fill = 1;
 static volatile uint32_t s_ws_hud_flip = 0xFFFFFFF0u;
 static volatile int s_ws_hud_bottom;     /* 3-4 fighters: HUD blocks in the bottom corners too */
+static volatile float s_ws_left_tag;     /* > 0: 2D drawn this far below the screen is a left-anchored tag */
+static int s_ws_batch_tagged;            /* the current batch carries that tag */
 static int s_ws_frame_3d, s_ws_frame_pic;  /* this frame drew 3D / centred a full-screen picture */
 static int s_ws_frame_wide;                /* this frame drew [wide] side slabs (ws_wide_sides) */
 static int s_ws_last_cls;                  /* the last placed batch: its class and extent */
@@ -840,6 +842,24 @@ void nv2a_ws_hud_heartbeat(int bottom_rows)
 {
     s_ws_hud_bottom = bottom_rows;
     s_ws_hud_flip = s_gpu.flips;
+}
+
+/* A title-side tag for 2D that belongs at the left edge but cannot be told
+ * apart by its shape (a menu notification sliding in from the left). The
+ * title draws such an element `y_offset` pixels lower than authored; a 2D
+ * batch whose first vertex lands in [y_offset - 256, y_offset + 768) is
+ * moved back up and anchored left like the fight HUD, clipped to the
+ * anchored 640-wide box instead of the centred one. 0 turns it off. The
+ * tag travels with the vertices, so it needs no timing with the title. */
+void nv2a_ws_set_left_tag(float y_offset)
+{
+    s_ws_left_tag = y_offset > 0.0f ? y_offset : 0.0f;
+}
+
+static int ws_tag_band(float y)
+{
+    float t = s_ws_left_tag;
+    return t > 0.0f && s_ws_k < 1.0f && y >= t - 256.0f && y < t + 768.0f;
 }
 
 /* End of a frame: the side fill goes beside a centred full-screen picture only
@@ -931,7 +951,9 @@ static void ws_place_batch(int vsh, uint32_t used, const PgraphReadyVertex *read
         if (p[1] < y0) y0 = p[1];
         if (p[1] > y1) y1 = p[1];
     }
-    if (cls && x0 <= 8.0f && x1 >= 632.0f && s_gpu.texs[0].valid && pgraph_d3d11_stage0_stretch()) {
+    if (cls && s_ws_batch_tagged) {
+        cls = 2;                           /* nv2a_ws_set_left_tag: already moved back up */
+    } else if (cls && x0 <= 8.0f && x1 >= 632.0f && s_gpu.texs[0].valid && pgraph_d3d11_stage0_stretch()) {
         /* A pack's [wide] stretch overlay (a vignette over 4:3 art) spanning the 4:3 width covers
          * the whole picture, also while it is animated vertically off full screen. */
         cls = 4;
@@ -4225,6 +4247,17 @@ static void draw_primitive(void)
                 gpu = vsh && gpu_on && !wc2
                     && ((s_gpu.prim >= 5 && s_gpu.prim <= 10) || s_gpu.prim == 1)
                     && !batch_dump_flip(s_gpu.flips) && pgraph_d3d11_program_usable();
+                s_ws_batch_tagged = 0;
+                if (s_ws_left_tag > 0.0f && s_ws_k < 1.0f) {
+                    /* A left-anchor tag (nv2a_ws_set_left_tag) is undone on the
+                     * transformed vertices, so such a batch takes the CPU path. */
+                    float p[4], t[2];
+                    if (ws_vertex(vsh, used, s_gpu.idx[0], p, t) && fabsf(p[3] - 1.0f) <= 1e-4f
+                            && ws_tag_band(p[1])) {
+                        s_ws_batch_tagged = 1;
+                        gpu = 0;
+                    }
+                }
             }
             if (gpu) {
                 static uint32_t gm_tag[VC_SIZE], gm_gen[VC_SIZE], gm_cur;
@@ -4578,6 +4611,11 @@ static void draw_primitive(void)
                     if (tex_only)
                         for (k = 0; k < n; k++)
                             ready[k].color |= 0x00FFFFFFu;
+                }
+                if (n >= 3 && s_ws_batch_tagged && !gpu) {
+                    uint32_t k;
+                    for (k = 0; k < n; k++)
+                        ready[k].y -= s_ws_left_tag;
                 }
                 if (n >= 3)
                     ws_place_batch(vsh, used, gpu ? NULL : ready, n);

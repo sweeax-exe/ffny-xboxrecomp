@@ -833,7 +833,7 @@ int pgraph_d3d11_wide_bind(unsigned slab)
             g_wide_saved = NULL;
         g_wide_saving = 1;
     }
-    return texture_pack_wide_bind(dev, 0, slab);
+    return texture_pack_wide_bind_source(dev, 0, slab, g_wide_saved);
 }
 const char *pgraph_d3d11_stage0_id(void) { return texture_pack_stage_id(0); }
 int pgraph_d3d11_stage0_stretch(void) { return g_pg.initialized && texture_pack_wide_stretch(0); }

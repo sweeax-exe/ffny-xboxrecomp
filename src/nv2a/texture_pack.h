@@ -22,6 +22,14 @@ void texture_pack_shutdown(IDirect3DDevice8 *device);
  * `slab` on the stage; 0 while it is still loading or was rejected. */
 int texture_pack_wide_slabs(unsigned stage, int *dt, unsigned max);
 int texture_pack_wide_bind(IDirect3DDevice8 *device, unsigned stage, unsigned slab);
+/* Optional application policy for side replays. Return nonzero to replay the central draw's
+ * current texture instead of a manifest slab. The callback runs on the render thread; register
+ * it before rendering starts. No filter preserves normal pack behavior. source_binding includes
+ * the original-texture fallback while an asynchronous replacement is loading. */
+typedef int (*RecompWideReplayFilter)(const char *source_id, int offset, void *user);
+void texture_pack_set_wide_replay_filter(RecompWideReplayFilter filter, void *user);
+int texture_pack_wide_bind_source(IDirect3DDevice8 *device, unsigned stage, unsigned slab,
+                                  IDirect3DBaseTexture8 *source_binding);
 /* With a widescreen picture, an anchor's inner: slab is bound in place of its replacement. */
 void texture_pack_set_widescreen(int on);
 /* 1 when the source last bound on `stage` is a [wide] stretch overlay. */

@@ -1,9 +1,11 @@
-/* The widescreen left-anchor tag (nv2a_ws_set_left_tag). Synthetic 2D
+/* The widescreen left/extended-centre tags. Synthetic 2D
  * triangles go through the real executor's host forwarding path; a translator
  * stub checks the clip and the vertices at draw time. A triangle drawn in the
  * tag band arrives moved back up and clipped to the left-anchored box; the same
  * triangle untagged stays centred; at 4:3, or with the tag off, a triangle in
- * the band is left alone. Guest memory is a synthetic buffer; no game data. */
+ * the band is left alone. The independent centre tag extends a full-width
+ * clip horizontally, preserving narrower masks and vertical clipping.
+ * Guest memory is a synthetic buffer; no game data. */
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -129,8 +131,38 @@ int main(void)
     expect_y0 = 300.0f;
     triangle(8192.0f + 300.0f);
 
-    CHECK(draws == 6);
+    /* An independent extend tag: centred, full canvas horizontally, original
+     * vertical scissor. Regular and left-tagged draws keep their own policy. */
+    nv2a_ws_configure(.75f, 1.0f);
+    nv2a_ws_set_extend_tag(16384.0f);
+    expected[0] = 0; expected[2] = 640;
+    expect_y0 = 300.0f;
+    triangle(16384.0f + 300.0f);
+    expected[0] = 80; expected[2] = 480;
+    triangle(300.0f);
+    expected[0] = 0; expected[2] = 480;
+    triangle(8192.0f + 300.0f);
+
+    /* A partial guest mask is preserved, including its vertical bounds. */
+    m(0x0200, 10u | (600u << 16)); m(0x0204, 20u | (400u << 16));
+    expected[0] = 88; expected[1] = 20; expected[2] = 450; expected[3] = 400;
+    triangle(16384.0f + 300.0f);
+    m(0x0200, 0u | (640u << 16));
+    expected[0] = 0; expected[2] = 640;
+    triangle(16384.0f + 300.0f);
+
+    /* Disabled tag and original 4:3 leave coordinates/scissors alone. */
+    nv2a_ws_set_extend_tag(0.0f);
+    expected[0] = 80; expected[2] = 480;
+    expect_y0 = 16384.0f + 300.0f;
+    triangle(expect_y0);
+    nv2a_ws_configure(1.0f, 1.0f);
+    nv2a_ws_set_extend_tag(16384.0f);
+    expected[0] = 0; expected[2] = 640;
+    triangle(expect_y0);
+
+    CHECK(draws == 13);
     if (!s_fail)
-        printf("nv2a-ws-left-tag: 6 draws checked\n");
+        printf("nv2a-ws-left-tag: 13 draws checked\n");
     return s_fail;
 }

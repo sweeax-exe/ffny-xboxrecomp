@@ -1075,7 +1075,8 @@ static volatile int s_ws_side_fill = 1;
 static volatile uint32_t s_ws_hud_flip = 0xFFFFFFF0u;
 static volatile int s_ws_hud_bottom;     /* 3-4 fighters: HUD blocks in the bottom corners too */
 static volatile float s_ws_left_tag;     /* > 0: 2D drawn this far below the screen is a left-anchored tag */
-static int s_ws_batch_tagged;            /* the current batch carries that tag */
+static volatile float s_ws_extend_tag;   /* > 0: centred 2D allowed into the canvas side areas */
+static int s_ws_batch_tagged;            /* 1 left, 2 centred with extended horizontal clip */
 static int s_ws_frame_3d, s_ws_frame_pic;  /* this frame drew 3D / centred a full-screen picture */
 static int s_ws_frame_wide;                /* this frame drew [wide] side slabs (ws_wide_sides) */
 static int s_ws_last_cls;                  /* the last placed batch: its class and extent */
@@ -1119,9 +1120,15 @@ void nv2a_ws_set_left_tag(float y_offset)
     s_ws_left_tag = y_offset > 0.0f ? y_offset : 0.0f;
 }
 
-static int ws_tag_band(float y)
+/* Like the left tag, but keep the authored horizontal placement and extend
+ * only a full-width guest clip to the canvas. Narrower masks remain intact. */
+void nv2a_ws_set_extend_tag(float y_offset)
 {
-    float t = s_ws_left_tag;
+    s_ws_extend_tag = y_offset > 0.0f ? y_offset : 0.0f;
+}
+
+static int ws_tag_band(float y, float t)
+{
     return t > 0.0f && s_ws_k < 1.0f && y >= t - 256.0f && y < t + 768.0f;
 }
 
@@ -1214,8 +1221,10 @@ static void ws_place_batch(int vsh, uint32_t used, const PgraphReadyVertex *read
         if (p[1] < y0) y0 = p[1];
         if (p[1] > y1) y1 = p[1];
     }
-    if (cls && s_ws_batch_tagged) {
+    if (cls && s_ws_batch_tagged == 1) {
         cls = 2;                           /* nv2a_ws_set_left_tag: already moved back up */
+    } else if (cls && s_ws_batch_tagged == 2) {
+        cls = 1;                           /* explicit centre placement, before HUD heuristics */
     } else if (cls && x0 <= 8.0f && x1 >= 632.0f && s_gpu.texs[0].valid && pgraph_d3d11_stage0_stretch()) {
         /* A pack's [wide] stretch overlay (a vignette over 4:3 art) spanning the 4:3 width covers
          * the whole picture, also while it is animated vertically off full screen. */
@@ -1295,6 +1304,10 @@ static void ws_place_batch(int vsh, uint32_t used, const PgraphReadyVertex *read
             float off = 320.0f * (1.0f - k + bx);
             uint32_t cx = (uint32_t)(clip_x * k + off + 0.5f);
             uint32_t cw = (uint32_t)(clip_w * k + 0.5f);
+            if (s_ws_batch_tagged == 2 && clip_x == 0 && clip_w == 640) {
+                cx = 0;
+                cw = 640;                 /* preserve the guest's vertical clip */
+            }
             pgraph_d3d11_set_placement(k, bx);
             pgraph_d3d11_set_surface_clip(cx, clip_y, cw ? cw : 1, clip_h);
         } else {
@@ -4537,14 +4550,17 @@ static void draw_primitive_body(void)
                     && ((s_gpu.prim >= 5 && s_gpu.prim <= 10) || s_gpu.prim == 1)
                     && !batch_dump_flip(s_gpu.flips) && pgraph_d3d11_program_usable();
                 s_ws_batch_tagged = 0;
-                if (s_ws_left_tag > 0.0f && s_ws_k < 1.0f) {
-                    /* A left-anchor tag (nv2a_ws_set_left_tag) is undone on the
+                if ((s_ws_left_tag > 0.0f || s_ws_extend_tag > 0.0f) && s_ws_k < 1.0f) {
+                    /* A placement tag is undone on the
                      * transformed vertices, so such a batch takes the CPU path. */
                     float p[4], t[2];
-                    if (ws_vertex(vsh, used, s_gpu.idx[0], p, t) && fabsf(p[3] - 1.0f) <= 1e-4f
-                            && ws_tag_band(p[1])) {
-                        s_ws_batch_tagged = 1;
-                        gpu = 0;
+                    if (ws_vertex(vsh, used, s_gpu.idx[0], p, t) && fabsf(p[3] - 1.0f) <= 1e-4f) {
+                        if (ws_tag_band(p[1], s_ws_left_tag))
+                            s_ws_batch_tagged = 1;
+                        else if (ws_tag_band(p[1], s_ws_extend_tag))
+                            s_ws_batch_tagged = 2;
+                        if (s_ws_batch_tagged)
+                            gpu = 0;
                     }
                 }
             }
@@ -4919,7 +4935,7 @@ static void draw_primitive_body(void)
                 if (n >= 3 && s_ws_batch_tagged && !gpu) {
                     uint32_t k;
                     for (k = 0; k < n; k++)
-                        ready[k].y -= s_ws_left_tag;
+                        ready[k].y -= s_ws_batch_tagged == 1 ? s_ws_left_tag : s_ws_extend_tag;
                 }
                 if (n >= 3)
                     ws_place_batch(vsh, used, gpu ? NULL : ready, n);

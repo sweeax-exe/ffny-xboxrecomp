@@ -4,7 +4,8 @@
  * tag band arrives moved back up and clipped to the left-anchored box; the same
  * triangle untagged stays centred; at 4:3, or with the tag off, a triangle in
  * the band is left alone. The independent centre tag extends a full-width
- * clip horizontally, preserving narrower masks and vertical clipping.
+ * clip horizontally, preserving narrower masks and vertical clipping. The
+ * fight HUD's strips go through the same path.
  * Guest memory is a synthetic buffer; no game data. */
 #include <stddef.h>
 #include <stdint.h>
@@ -54,8 +55,9 @@ static int s_fail;
 #define CHECK(c) do { if (!(c)) { printf("FAIL line %d: %s\n", __LINE__, #c); s_fail = 1; } } while (0)
 
 extern void nv2a_ws_configure(float k, float reach);
+extern void nv2a_ws_hud_heartbeat(int bottom_rows);
 static uint32_t clip[4], expected[4], draws;
-static float expect_y0;
+static float expect_y0, expect_h = 50.0f;
 void pgraph_d3d11_set_surface_clip(uint32_t x, uint32_t y, uint32_t w, uint32_t h)
 { clip[0] = x; clip[1] = y; clip[2] = w; clip[3] = h; }
 void pgraph_d3d11_draw_ready(uint32_t mode, const PgraphReadyVertex *v, uint32_t n)
@@ -68,7 +70,7 @@ void pgraph_d3d11_draw_ready(uint32_t mode, const PgraphReadyVertex *v, uint32_t
         printf("draw %u: clip %u %u %u %u, expected %u %u %u %u\n", draws, clip[0], clip[1], clip[2], clip[3],
                expected[0], expected[1], expected[2], expected[3]);
     if (n >= 3)
-        CHECK(v[0].y == expect_y0 && v[1].y == expect_y0 && v[2].y == expect_y0 + 50.0f);
+        CHECK(v[0].y == expect_y0 && v[1].y == expect_y0 && v[2].y == expect_y0 + expect_h);
 }
 
 /* One 2D triangle at y (y, y, y + 50), x 150..200: wholly left of the middle,
@@ -79,6 +81,51 @@ static void triangle(float y)
     putf(0x200C, 200); putf(0x2010, y);         putf(0x2014, 0);
     putf(0x2018, 170); putf(0x201C, y + 50.0f); putf(0x2020, 0);
     m(0x17FC, 5); m(0x1810, 2u << 24); m(0x17FC, 0);
+}
+
+/* A 2D batch with this extent, as the fight HUD draws them. */
+static void box(float x0, float x1, float y0, float y1)
+{
+    putf(0x2000, x0); putf(0x2004, y0); putf(0x2008, 0);
+    putf(0x200C, x1); putf(0x2010, y0); putf(0x2014, 0);
+    putf(0x2018, x0); putf(0x201C, y1); putf(0x2020, 0);
+    expect_y0 = y0;
+    expect_h = y1 - y0;
+    m(0x17FC, 5); m(0x1810, 2u << 24); m(0x17FC, 0);
+    expect_h = 50.0f;
+}
+
+/* The fight HUD's strips at this aspect. Extents are the combo call-out's
+ * ("1ST COMBO MOVE": a digit, a suffix and text, three batches) and the pause
+ * panel's, measured in Def Jam. `left` and `right` are the clip's x when
+ * anchored; every clip is `width` wide. */
+static void hud_strips(uint32_t left, uint32_t right, uint32_t centred, uint32_t width)
+{
+    expected[2] = width;
+    nv2a_ws_hud_heartbeat(0);
+    expected[0] = left;
+    box(48, 68, 106.5f, 142.4f);                /* P1 digit at its largest */
+    box(64, 92, 108.6f, 124.0f);                /* P1 suffix */
+    box(64, 196, 120.5f, 136.5f);               /* P1 text */
+    expected[0] = right;
+    box(448, 464, 110.0f, 142.4f);              /* P2 digit */
+    box(462, 594, 124.5f, 140.5f);              /* P2 text */
+    expected[0] = centred;
+    box(48, 68, 150.0f, 170.0f);                /* below the top strip */
+    box(240, 400, 120.0f, 136.0f);              /* across the middle */
+    box(48, 68, 338.5f, 370.4f);                /* no bottom strip with two fighters */
+
+    nv2a_ws_hud_heartbeat(1);
+    expected[0] = left;
+    box(48, 68, 338.5f, 370.4f);                /* P3 digit at its largest */
+    box(64, 92, 340.6f, 356.1f);                /* P3 suffix */
+    box(64, 196, 352.5f, 368.5f);               /* P3 text */
+    expected[0] = right;
+    box(448, 464, 338.5f, 370.4f);              /* P4 digit */
+    box(460, 488, 340.6f, 356.1f);              /* P4 suffix */
+    expected[0] = centred;
+    box(146, 268, 330.0f, 346.0f);              /* the pause panel's lowest piece */
+    nv2a_ws_hud_heartbeat(0);
 }
 
 int main(void)
@@ -161,8 +208,26 @@ int main(void)
     expected[0] = 0; expected[2] = 640;
     triangle(expect_y0);
 
-    CHECK(draws == 13);
+    /* The fight HUD's strips, on no tag: at 16:9 to the screen edges, on
+     * ultrawide to the edges of the centred 16:9 box. */
+    nv2a_ws_set_left_tag(0.0f);
+    nv2a_ws_set_extend_tag(0.0f);
+    m(0x0204, 0u | (480u << 16));               /* the whole height again */
+    expected[1] = 0; expected[3] = 480;
+    nv2a_ws_configure(.75f, 1.0f);
+    hud_strips(0, 160, 80, 480);
+    nv2a_ws_configure(4.0f / 7.0f, 0.75f);
+    hud_strips(80, 194, 137, 366);
+
+    /* 4:3: nothing is placed, in a strip or not. */
+    nv2a_ws_configure(1.0f, 1.0f);
+    expected[0] = 0; expected[2] = 640;
+    nv2a_ws_hud_heartbeat(1);
+    box(48, 68, 106.5f, 142.4f);
+    box(48, 68, 338.5f, 370.4f);
+
+    CHECK(draws == 43);
     if (!s_fail)
-        printf("nv2a-ws-left-tag: 13 draws checked\n");
+        printf("nv2a-ws-left-tag: 43 draws checked\n");
     return s_fail;
 }

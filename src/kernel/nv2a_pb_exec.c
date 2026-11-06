@@ -1242,9 +1242,13 @@ static void ws_place_batch(int vsh, uint32_t used, const PgraphReadyVertex *read
          * stretches like the full-screen ones instead of stopping at the 4:3 edges. */
         cls = 4;
     } else if (cls && (uint32_t)(s_gpu.flips - s_ws_hud_flip) <= 30u
-               && (y1 <= 130.0f || (s_ws_hud_bottom && y0 >= 350.0f))) {
+               && (y1 <= 146.0f || (s_ws_hud_bottom && y0 >= 336.0f))) {
         /* Only the HUD's own strips: the top one, and the bottom one with 3-4
-         * fighters. Tutorial prompts and other centred text stay whole. */
+         * fighters. Tutorial prompts and other centred text stay whole. The
+         * limits take in the whole combo call-out, whose digit, suffix and
+         * text are separate batches (the digit pops out to y 142.4 at the top
+         * and 338.5 at the bottom). The pause panel's lowest one-sided piece
+         * starts at y 330, so it stays centred. */
         if (x1 <= 300.0f)
             cls = 2;
         else if (x0 >= 340.0f)

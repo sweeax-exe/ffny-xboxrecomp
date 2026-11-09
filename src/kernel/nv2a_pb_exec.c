@@ -1082,9 +1082,13 @@ static volatile int s_ws_side_fill = 1;
 static volatile uint32_t s_ws_hud_flip = 0xFFFFFFF0u;
 static volatile int s_ws_hud_bottom;     /* 3-4 fighters: HUD blocks in the bottom corners too */
 static volatile float s_ws_left_tag;     /* > 0: 2D drawn this far below the screen is a left-anchored tag */
-static int s_ws_batch_tagged;            /* the current batch carries that tag */
+static volatile float s_ws_extend_tag;   /* > 0: centred 2D allowed into the canvas side areas */
+static int s_ws_batch_tagged;            /* 1 left, 2 centred with extended horizontal clip */
 static int s_ws_frame_3d, s_ws_frame_pic;  /* this frame drew 3D / centred a full-screen picture */
 static int s_ws_frame_wide;                /* this frame drew [wide] side slabs (ws_wide_sides) */
+static int s_ws_fill_last, s_ws_fill_run;  /* the last frame got the side fill; for how many frames */
+static int s_ws_fill_steady;               /* ... and so for WS_FILL_STEADY frames or more */
+#define WS_FILL_STEADY 8                   /* a screen change has a frame or five without its [wide] art */
 static int s_ws_last_cls;                  /* the last placed batch: its class and extent */
 static float s_ws_x0, s_ws_x1, s_ws_y0, s_ws_y1, s_ws_u0, s_ws_u1, s_ws_v0, s_ws_v1;  /* u, v in texels */
 static int fetch_texcoord(uint32_t index, float out[2]);
@@ -1126,9 +1130,41 @@ void nv2a_ws_set_left_tag(float y_offset)
     s_ws_left_tag = y_offset > 0.0f ? y_offset : 0.0f;
 }
 
-static int ws_tag_band(float y)
+/* Like the left tag, but keep the authored horizontal placement and extend
+ * only a full-width guest clip to the canvas. Narrower masks remain intact. */
+void nv2a_ws_set_extend_tag(float y_offset)
 {
-    float t = s_ws_left_tag;
+    s_ws_extend_tag = y_offset > 0.0f ? y_offset : 0.0f;
+}
+
+/* Def Jam's struggle meter under a top fighter's limb health ("TAP ANY BUTTON" in a
+ * submission): a frame (y 121..186), a fill bar (y 136..147) and its text (y 146.5..162.5),
+ * measured at 16:9 for both top fighters. It starts inside the HUD's top strip and reaches
+ * below it, so it belongs with the strip: a one-sided batch that starts at y 118..150, ends by
+ * y 190 and is 18 tall or less or 60 or more. The pause panel's pieces start at y 161.5 or
+ * lower down; the match summary's rows that start this high, drawn just after a fight, are
+ * 23-26 tall. */
+static int ws_hud_meter(float y0, float y1)
+{
+    float h = y1 - y0;
+    return y0 >= 118.0f && y0 <= 150.0f && y1 <= 190.0f && (h <= 18.0f || h >= 60.0f);
+}
+
+/* The same meter for a bottom fighter (3-4 in the match), mirrored about its HUD: the text above
+ * it (y 314..330, 16 tall), the frame (y 331..395, 64 tall) and the fill bar (y 335..345,
+ * 10 tall), measured at 16:9 for fighters 3 and 4. Each is matched by where it starts and its
+ * height: the pause panel's lowest one-sided piece (y 330..346, 16 tall) lies between them and
+ * stays centred. */
+static int ws_hud_meter_bottom(float y0, float y1)
+{
+    float h = y1 - y0;
+    return (h >= 60.0f && y0 >= 320.0f && y0 <= 340.0f)                      /* frame */
+        || (h <= 12.0f && y0 >= 330.0f && y0 <= 340.0f && y1 <= 350.0f)     /* fill bar */
+        || (h <= 18.0f && y0 >= 308.0f && y1 >= 326.0f && y1 <= 332.0f);    /* text */
+}
+
+static int ws_tag_band(float y, float t)
+{
     return t > 0.0f && s_ws_k < 1.0f && y >= t - 256.0f && y < t + 768.0f;
 }
 
@@ -1138,12 +1174,22 @@ static int ws_tag_band(float y)
  * present, a frame later at most. */
 static void ws_end_frame(void)
 {
-    if (s_ws_k < 1.0f && s_ws_side_fill && s_ws_frame_pic && !s_ws_frame_3d && !s_ws_frame_wide) {
+    int fill = s_ws_k < 1.0f && s_ws_side_fill && s_ws_frame_pic && !s_ws_frame_3d && !s_ws_frame_wide;
+    s_ws_fill_run = fill == s_ws_fill_last ? s_ws_fill_run + 1 : 1;
+    s_ws_fill_last = fill;
+    if (s_ws_fill_run >= WS_FILL_STEADY)
+        s_ws_fill_steady = fill;
+    if (fill) {
         extern void d3d8_RequestSideFill(void);
         d3d8_RequestSideFill();
     }
     s_ws_frame_3d = s_ws_frame_pic = s_ws_frame_wide = 0;
 }
+
+#ifdef NV2A_HOST_CLIP_TEST
+/* Fixtures: this frame centred a full-screen picture (as a 4:3 menu background does). */
+void nv2a_ws_test_frame_picture(void) { s_ws_frame_pic = 1; }
+#endif
 
 static int ws_vertex(int vsh, uint32_t used, uint32_t vi, float out[4], float uv[2])
 {
@@ -1221,8 +1267,24 @@ static void ws_place_batch(int vsh, uint32_t used, const PgraphReadyVertex *read
         if (p[1] < y0) y0 = p[1];
         if (p[1] > y1) y1 = p[1];
     }
-    if (cls && s_ws_batch_tagged) {
-        cls = 2;                           /* nv2a_ws_set_left_tag: already moved back up */
+    if (cls && s_ws_batch_tagged == 1) {
+        /* nv2a_ws_set_left_tag: already moved back up. At the left edge, except over a 4:3
+         * picture whose sides get the side fill (a menu background with no [wide] art): the
+         * fill is drawn over the side areas at present and would cover the element there, so
+         * it stays in the 4:3 box with the picture, where the title put it. The frames before
+         * decide, once they agree for WS_FILL_STEADY frames, so a screen keeps one placement. */
+        cls = s_ws_fill_steady ? 1 : 2;
+        {
+            static int trace = -1, last = -1;
+            if (trace < 0)
+                trace = getenv("RECOMP_WS_WIDE_TRACE") != NULL;
+            if (trace && cls != last)
+                fprintf(stderr, "[WS] left tag: %s (flip %u)%c", cls == 1 ? "in the 4:3 box, over a side-filled picture"
+                                                                  : "at the left edge", s_gpu.flips, 10);
+            last = cls;
+        }
+    } else if (cls && s_ws_batch_tagged == 2) {
+        cls = 1;                           /* explicit centre placement, before HUD heuristics */
     } else if (cls && x0 <= 8.0f && x1 >= 632.0f && s_gpu.texs[0].valid && pgraph_d3d11_stage0_stretch()) {
         /* A pack's [wide] stretch overlay (a vignette over 4:3 art) spanning the 4:3 width covers
          * the whole picture, also while it is animated vertically off full screen. */
@@ -1249,9 +1311,16 @@ static void ws_place_batch(int vsh, uint32_t used, const PgraphReadyVertex *read
          * stretches like the full-screen ones instead of stopping at the 4:3 edges. */
         cls = 4;
     } else if (cls && (uint32_t)(s_gpu.flips - s_ws_hud_flip) <= 30u
-               && (y1 <= 130.0f || (s_ws_hud_bottom && y0 >= 350.0f))) {
+               && (y1 <= 146.0f || ws_hud_meter(y0, y1)
+                   || (s_ws_hud_bottom && (y0 >= 336.0f || ws_hud_meter_bottom(y0, y1))))) {
         /* Only the HUD's own strips: the top one, and the bottom one with 3-4
-         * fighters. Tutorial prompts and other centred text stay whole. */
+         * fighters. Tutorial prompts and other centred text stay whole. The
+         * limits take in the whole combo call-out, whose digit, suffix and
+         * text are separate batches (the digit pops out to y 142.4 at the top
+         * and 338.5 at the bottom). The pause panel's lowest one-sided piece
+         * starts at y 330, so it stays centred. The struggle meter goes with
+         * the top strip (ws_hud_meter), and a bottom fighter's with the
+         * bottom one (ws_hud_meter_bottom). */
         if (x1 <= 300.0f)
             cls = 2;
         else if (x0 >= 340.0f)
@@ -1302,6 +1371,10 @@ static void ws_place_batch(int vsh, uint32_t used, const PgraphReadyVertex *read
             float off = 320.0f * (1.0f - k + bx);
             uint32_t cx = (uint32_t)(clip_x * k + off + 0.5f);
             uint32_t cw = (uint32_t)(clip_w * k + 0.5f);
+            if (s_ws_batch_tagged == 2 && clip_x == 0 && clip_w == 640) {
+                cx = 0;
+                cw = 640;                 /* preserve the guest's vertical clip */
+            }
             pgraph_d3d11_set_placement(k, bx);
             pgraph_d3d11_set_surface_clip(cx, clip_y, cw ? cw : 1, clip_h);
         } else {
@@ -4148,8 +4221,12 @@ static void bind_texture_ready(const Texture *t)
     }
     if (t->color != NV097_TEXFMT_SZ_I8_A8R8G8B8 || !t->palette
             || !w || !h || w > 4096 || h > 4096) {
-        pgraph_d3d11_set_texture_ready(t->offset, mem + t->offset,
-                                       linear_row_texels(t), h, t->color);
+        if (tex_size_from_format(t->color) && !t->cube && t->levels > 1)
+            pgraph_d3d11_set_texture_ready_mips(t->offset, mem + t->offset,
+                                                w, h, t->color, t->levels);
+        else
+            pgraph_d3d11_set_texture_ready(t->offset, mem + t->offset,
+                                           linear_row_texels(t), h, t->color);
         return;
     }
 
@@ -4540,14 +4617,17 @@ static void draw_primitive_body(void)
                     && ((s_gpu.prim >= 5 && s_gpu.prim <= 10) || s_gpu.prim == 1)
                     && !batch_dump_flip(s_gpu.flips) && pgraph_d3d11_program_usable();
                 s_ws_batch_tagged = 0;
-                if (s_ws_left_tag > 0.0f && s_ws_k < 1.0f) {
-                    /* A left-anchor tag (nv2a_ws_set_left_tag) is undone on the
+                if ((s_ws_left_tag > 0.0f || s_ws_extend_tag > 0.0f) && s_ws_k < 1.0f) {
+                    /* A placement tag is undone on the
                      * transformed vertices, so such a batch takes the CPU path. */
                     float p[4], t[2];
-                    if (ws_vertex(vsh, used, s_gpu.idx[0], p, t) && fabsf(p[3] - 1.0f) <= 1e-4f
-                            && ws_tag_band(p[1])) {
-                        s_ws_batch_tagged = 1;
-                        gpu = 0;
+                    if (ws_vertex(vsh, used, s_gpu.idx[0], p, t) && fabsf(p[3] - 1.0f) <= 1e-4f) {
+                        if (ws_tag_band(p[1], s_ws_left_tag))
+                            s_ws_batch_tagged = 1;
+                        else if (ws_tag_band(p[1], s_ws_extend_tag))
+                            s_ws_batch_tagged = 2;
+                        if (s_ws_batch_tagged)
+                            gpu = 0;
                     }
                 }
             }
@@ -4924,7 +5004,7 @@ static void draw_primitive_body(void)
                 if (n >= 3 && s_ws_batch_tagged && !gpu) {
                     uint32_t k;
                     for (k = 0; k < n; k++)
-                        ready[k].y -= s_ws_left_tag;
+                        ready[k].y -= s_ws_batch_tagged == 1 ? s_ws_left_tag : s_ws_extend_tag;
                 }
                 if (n >= 3)
                     ws_place_batch(vsh, used, gpu ? NULL : ready, n);

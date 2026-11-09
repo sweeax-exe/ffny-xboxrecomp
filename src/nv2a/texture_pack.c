@@ -58,6 +58,8 @@ static WideAnchor *g_wide;
 static size_t g_wide_count;
 static unsigned g_wide_serial;
 static int g_widescreen;     /* texture_pack_set_widescreen: inner slabs replace their anchors */
+static RecompWideReplayFilter g_wide_replay_filter;
+static void *g_wide_replay_user;
 /* [wide] <id> = stretch: a full-screen overlay (a vignette) drawn across the whole widescreen
  * picture instead of centred with the 4:3 art. */
 static char (*g_stretch)[65];
@@ -934,6 +936,20 @@ int texture_pack_wide_bind(IDirect3DDevice8 *dev,unsigned stage,unsigned slab)
     if(!a || slab>=a->count || !dev) return 0;
     return bind_slab(dev,stage,&g_entries[a->first+slab],a->id);
 }
+void texture_pack_set_wide_replay_filter(RecompWideReplayFilter filter,void *user)
+{
+    g_wide_replay_filter=filter;
+    g_wide_replay_user=user;
+}
+int texture_pack_wide_bind_source(IDirect3DDevice8 *dev,unsigned stage,unsigned slab,
+                                  IDirect3DBaseTexture8 *source_binding)
+{
+    const WideAnchor *a=wide_anchor(stage);
+    if(!a || slab>=a->count || !dev) return 0;
+    if(g_wide_replay_filter && g_wide_replay_filter(a->id,g_entries[a->first+slab].dt,g_wide_replay_user))
+        return source_binding && SUCCEEDED(dev->lpVtbl->SetTexture(dev,stage,source_binding));
+    return bind_slab(dev,stage,&g_entries[a->first+slab],a->id);
+}
 static int bind_slab(IDirect3DDevice8 *dev,unsigned stage,PackEntry *e,const char *anchor)
 {
     ULONGLONG now=now_ms();
@@ -956,6 +972,7 @@ void texture_pack_shutdown(IDirect3DDevice8 *dev)
     if(g_active) fprintf(stderr,"[TEXPACK] hits=%llu misses=%llu dumps=%llu hashed=%llu resident=%llu\n",
         (unsigned long long)g_hits,(unsigned long long)g_misses,(unsigned long long)g_dumps,(unsigned long long)g_hashed,(unsigned long long)g_resident);
     workers_stop();
+    g_wide_replay_filter=NULL; g_wide_replay_user=NULL;
     if(dev) for(i=0;i<g_count;i++) release_entry(dev,&g_entries[i]);
     free(g_entries); g_entries=NULL; g_count=g_capacity=0;
     memset(g_sources,0,sizeof g_sources);

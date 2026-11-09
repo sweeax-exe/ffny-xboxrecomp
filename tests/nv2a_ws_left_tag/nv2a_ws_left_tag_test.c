@@ -1,9 +1,13 @@
-/* The widescreen left-anchor tag (nv2a_ws_set_left_tag). Synthetic 2D
+/* The widescreen left/extended-centre tags. Synthetic 2D
  * triangles go through the real executor's host forwarding path; a translator
  * stub checks the clip and the vertices at draw time. A triangle drawn in the
  * tag band arrives moved back up and clipped to the left-anchored box; the same
  * triangle untagged stays centred; at 4:3, or with the tag off, a triangle in
- * the band is left alone. Guest memory is a synthetic buffer; no game data. */
+ * the band is left alone. The independent centre tag extends a full-width
+ * clip horizontally, preserving narrower masks and vertical clipping. The
+ * fight HUD's strips go through the same path. Over a 4:3 picture that gets the
+ * side fill, a left-tagged triangle stays in the 4:3 box instead.
+ * Guest memory is a synthetic buffer; no game data. */
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -52,8 +56,21 @@ static int s_fail;
 #define CHECK(c) do { if (!(c)) { printf("FAIL line %d: %s\n", __LINE__, #c); s_fail = 1; } } while (0)
 
 extern void nv2a_ws_configure(float k, float reach);
+extern void nv2a_ws_hud_heartbeat(int bottom_rows);
+extern void nv2a_ws_set_side_fill(int on);
+extern void nv2a_ws_test_frame_picture(void);
+static void flip(void) { m(0x012C, 0); }        /* NV097_FLIP_INCREMENT_WRITE: the frame ends */
+/* n frames like the last: with the side fill (a centred 4:3 picture) or without. */
+static void frames(int n, int picture)
+{
+    while (n-- > 0) {
+        if (picture)
+            nv2a_ws_test_frame_picture();
+        flip();
+    }
+}
 static uint32_t clip[4], expected[4], draws;
-static float expect_y0;
+static float expect_y0, expect_h = 50.0f;
 void pgraph_d3d11_set_surface_clip(uint32_t x, uint32_t y, uint32_t w, uint32_t h)
 { clip[0] = x; clip[1] = y; clip[2] = w; clip[3] = h; }
 void pgraph_d3d11_draw_ready(uint32_t mode, const PgraphReadyVertex *v, uint32_t n)
@@ -66,7 +83,7 @@ void pgraph_d3d11_draw_ready(uint32_t mode, const PgraphReadyVertex *v, uint32_t
         printf("draw %u: clip %u %u %u %u, expected %u %u %u %u\n", draws, clip[0], clip[1], clip[2], clip[3],
                expected[0], expected[1], expected[2], expected[3]);
     if (n >= 3)
-        CHECK(v[0].y == expect_y0 && v[1].y == expect_y0 && v[2].y == expect_y0 + 50.0f);
+        CHECK(v[0].y == expect_y0 && v[1].y == expect_y0 && v[2].y == expect_y0 + expect_h);
 }
 
 /* One 2D triangle at y (y, y, y + 50), x 150..200: wholly left of the middle,
@@ -77,6 +94,72 @@ static void triangle(float y)
     putf(0x200C, 200); putf(0x2010, y);         putf(0x2014, 0);
     putf(0x2018, 170); putf(0x201C, y + 50.0f); putf(0x2020, 0);
     m(0x17FC, 5); m(0x1810, 2u << 24); m(0x17FC, 0);
+}
+
+/* A 2D batch with this extent, as the fight HUD draws them. */
+static void box(float x0, float x1, float y0, float y1)
+{
+    putf(0x2000, x0); putf(0x2004, y0); putf(0x2008, 0);
+    putf(0x200C, x1); putf(0x2010, y0); putf(0x2014, 0);
+    putf(0x2018, x0); putf(0x201C, y1); putf(0x2020, 0);
+    expect_y0 = y0;
+    expect_h = y1 - y0;
+    m(0x17FC, 5); m(0x1810, 2u << 24); m(0x17FC, 0);
+    expect_h = 50.0f;
+}
+
+/* The fight HUD's strips at this aspect. Extents are the combo call-out's
+ * ("1ST COMBO MOVE": a digit, a suffix and text, three batches) and the pause
+ * panel's, measured in Def Jam. `left` and `right` are the clip's x when
+ * anchored; every clip is `width` wide. */
+static void hud_strips(uint32_t left, uint32_t right, uint32_t centred, uint32_t width)
+{
+    expected[2] = width;
+    nv2a_ws_hud_heartbeat(0);
+    expected[0] = left;
+    box(48, 68, 106.5f, 142.4f);                /* P1 digit at its largest */
+    box(64, 92, 108.6f, 124.0f);                /* P1 suffix */
+    box(64, 196, 120.5f, 136.5f);               /* P1 text */
+    expected[0] = right;
+    box(448, 464, 110.0f, 142.4f);              /* P2 digit */
+    box(462, 594, 124.5f, 140.5f);              /* P2 text */
+    expected[0] = left;
+    box(41, 297, 122.0f, 186.0f);               /* P1 struggle meter: frame */
+    box(52, 183, 137.0f, 147.0f);               /* its fill bar */
+    box(46.5f, 218.5f, 146.5f, 162.5f);         /* its text ("TAP ANY BUTTON") */
+    expected[0] = right;
+    box(343, 599, 121.0f, 185.0f);              /* P2 struggle meter: frame */
+    box(455, 588, 136.0f, 146.0f);              /* its fill bar */
+    expected[0] = centred;
+    box(48, 68, 150.0f, 170.0f);                /* below the top strip */
+    box(235.5f, 248.5f, 162.5f, 180.5f);        /* the pause panel's highest one-sided piece */
+    box(125.5f, 233.5f, 196.5f, 211.5f);        /* a pause panel label */
+    box(66, 199, 145.0f, 171.0f);               /* match summary rows, just after a fight */
+    box(455, 554, 124.0f, 147.0f);
+    box(435, 569, 141.0f, 164.0f);
+    box(240, 400, 120.0f, 136.0f);              /* across the middle */
+    box(48, 68, 338.5f, 370.4f);                /* no bottom strip with two fighters */
+
+    nv2a_ws_hud_heartbeat(1);
+    expected[0] = left;
+    box(48, 68, 338.5f, 370.4f);                /* P3 digit at its largest */
+    box(64, 92, 340.6f, 356.1f);                /* P3 suffix */
+    box(64, 196, 352.5f, 368.5f);               /* P3 text */
+    expected[0] = right;
+    box(448, 464, 338.5f, 370.4f);              /* P4 digit */
+    box(460, 488, 340.6f, 356.1f);              /* P4 suffix */
+    expected[0] = left;
+    box(48.5f, 183.5f, 314.0f, 330.0f);         /* P3 struggle meter: text above the HUD */
+    box(41, 297, 331.0f, 395.0f);               /* its frame */
+    box(138.4f, 159.9f, 335.0f, 345.0f);        /* its fill bar */
+    expected[0] = right;
+    box(465.5f, 590.5f, 314.0f, 330.0f);        /* P4 struggle meter: text */
+    box(343, 599, 331.0f, 395.0f);              /* its frame */
+    box(467.6f, 475.4f, 335.0f, 345.0f);        /* its fill bar */
+    expected[0] = centred;
+    box(146, 268, 330.0f, 346.0f);              /* the pause panel's lowest piece */
+    box(190.5f, 223.5f, 300.0f, 316.0f);        /* a pause panel piece above it */
+    nv2a_ws_hud_heartbeat(0);
 }
 
 int main(void)
@@ -111,6 +194,28 @@ int main(void)
     expect_y0 = 2514.0f;
     triangle(2514.0f);
 
+    /* A frame that centred a 4:3 picture and got the side fill (a menu background with no
+     * [wide] art): the next frame's tagged triangle stays in the 4:3 box, under the fill's
+     * sides no more. A frame without it (3D, [wide] art, or the fill off) anchors left again. */
+    nv2a_ws_set_side_fill(1);
+    frames(7, 1);                               /* not yet: a screen change's few frames */
+    expected[0] = 0; expected[2] = 480;
+    expect_y0 = 300.0f;
+    triangle(8192.0f + 300.0f);
+    frames(1, 1);                               /* eight in a row: a 4:3 menu screen */
+    expected[0] = 80; expected[2] = 480;
+    triangle(8192.0f + 300.0f);
+    frames(3, 0);                               /* a few frames with its [wide] art missing: no change */
+    frames(1, 1);
+    triangle(8192.0f + 300.0f);
+    frames(8, 0);                               /* a 3D or [wide] screen: the left edge again */
+    expected[0] = 0; expected[2] = 480;
+    triangle(8192.0f + 300.0f);
+    nv2a_ws_set_side_fill(0);
+    frames(8, 1);                               /* the fill off: no fill, the left edge */
+    triangle(8192.0f + 300.0f);
+    expected[0] = 80;                           /* centred, as the tests below expect */
+
     /* Tag off: a triangle in the band is drawn where it is. */
     nv2a_ws_set_left_tag(0.0f);
     expect_y0 = 8192.0f + 300.0f;
@@ -129,8 +234,56 @@ int main(void)
     expect_y0 = 300.0f;
     triangle(8192.0f + 300.0f);
 
-    CHECK(draws == 6);
+    /* An independent extend tag: centred, full canvas horizontally, original
+     * vertical scissor. Regular and left-tagged draws keep their own policy. */
+    nv2a_ws_configure(.75f, 1.0f);
+    nv2a_ws_set_extend_tag(16384.0f);
+    expected[0] = 0; expected[2] = 640;
+    expect_y0 = 300.0f;
+    triangle(16384.0f + 300.0f);
+    expected[0] = 80; expected[2] = 480;
+    triangle(300.0f);
+    expected[0] = 0; expected[2] = 480;
+    triangle(8192.0f + 300.0f);
+
+    /* A partial guest mask is preserved, including its vertical bounds. */
+    m(0x0200, 10u | (600u << 16)); m(0x0204, 20u | (400u << 16));
+    expected[0] = 88; expected[1] = 20; expected[2] = 450; expected[3] = 400;
+    triangle(16384.0f + 300.0f);
+    m(0x0200, 0u | (640u << 16));
+    expected[0] = 0; expected[2] = 640;
+    triangle(16384.0f + 300.0f);
+
+    /* Disabled tag and original 4:3 leave coordinates/scissors alone. */
+    nv2a_ws_set_extend_tag(0.0f);
+    expected[0] = 80; expected[2] = 480;
+    expect_y0 = 16384.0f + 300.0f;
+    triangle(expect_y0);
+    nv2a_ws_configure(1.0f, 1.0f);
+    nv2a_ws_set_extend_tag(16384.0f);
+    expected[0] = 0; expected[2] = 640;
+    triangle(expect_y0);
+
+    /* The fight HUD's strips, on no tag: at 16:9 to the screen edges, on
+     * ultrawide to the edges of the centred 16:9 box. */
+    nv2a_ws_set_left_tag(0.0f);
+    nv2a_ws_set_extend_tag(0.0f);
+    m(0x0204, 0u | (480u << 16));               /* the whole height again */
+    expected[1] = 0; expected[3] = 480;
+    nv2a_ws_configure(.75f, 1.0f);
+    hud_strips(0, 160, 80, 480);
+    nv2a_ws_configure(4.0f / 7.0f, 0.75f);
+    hud_strips(80, 194, 137, 366);
+
+    /* 4:3: nothing is placed, in a strip or not. */
+    nv2a_ws_configure(1.0f, 1.0f);
+    expected[0] = 0; expected[2] = 640;
+    nv2a_ws_hud_heartbeat(1);
+    box(48, 68, 106.5f, 142.4f);
+    box(48, 68, 338.5f, 370.4f);
+
+    CHECK(draws == 82);
     if (!s_fail)
-        printf("nv2a-ws-left-tag: 6 draws checked\n");
+        printf("nv2a-ws-left-tag: 82 draws checked\n");
     return s_fail;
 }

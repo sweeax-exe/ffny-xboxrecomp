@@ -46,6 +46,13 @@ static IDirect3DDevice8Vtbl device_vtable;
 static IDirect3DDevice8 device={&device_vtable};
 static IDirect3DBaseTexture8 *bound[4];
 static unsigned creates, destroys, fail_creates;
+typedef struct ReplayPolicy { const char *id; int enabled, calls; } ReplayPolicy;
+static int replay_source(const char *id,int offset,void *user)
+{
+    ReplayPolicy *policy=user;
+    policy->calls++;
+    return policy->enabled && offset==0 && !strcmp(id,policy->id);
+}
 static ULONG __stdcall addref(IDirect3DTexture8 *iface) { return ++((MockTexture *)iface)->refs; }
 static ULONG __stdcall release(IDirect3DTexture8 *iface)
 {
@@ -359,14 +366,50 @@ int main(void)
         memcpy(g_stage_id[0],id,65);
         g_stage_shape[0]=(RecompTextureSource){1,6,1,1,1,pixel,4,0,0,0,NULL,0};
         snprintf(path,sizeof path,"%s/wide/slabs/m4.png",root); assert(write_png(path,pixel,2,2));
+        snprintf(path,sizeof path,"%s/wide/slabs/in.png",root); assert(write_png(path,pixel,2,2));
         snprintf(path,sizeof path,"%s/wide/slabs/p4.png",root); assert(write_png(path,pixel,2,1));
         g_sync_load=1; g_budget=1u<<20;
         assert(texture_pack_wide_bind(&device,0,0)==1 && bound[0]);
+        {
+            IDirect3DTexture8 *source;
+            IDirect3DBaseTexture8 *side=bound[0];
+            ReplayPolicy policy={id,1,0};
+            unsigned before=creates;
+            assert(SUCCEEDED(create_texture(&device,1,1,1,0,D3DFMT_A8R8G8B8,0,&source)));
+            /* Selection must bind the saved source, including a caller's original-texture
+             * fallback, without decoding the zero-offset manifest image. */
+            texture_pack_set_wide_replay_filter(replay_source,&policy);
+            assert(texture_pack_wide_bind_source(&device,0,1,(IDirect3DBaseTexture8 *)source));
+            assert(bound[0]==(IDirect3DBaseTexture8 *)source && creates==before+1);
+            assert(texture_pack_wide_bind_source(&device,0,0,(IDirect3DBaseTexture8 *)source));
+            assert(bound[0]==side);  /* nonzero offsets retain their manifest slab */
+            assert(texture_pack_wide_bind_source(&device,0,1,(IDirect3DBaseTexture8 *)source));
+            assert(bound[0]==(IDirect3DBaseTexture8 *)source); /* restore after a different slab */
+            assert(!texture_pack_wide_bind_source(&device,0,1,NULL));
+            assert(bound[0]==(IDirect3DBaseTexture8 *)source);
+            policy.enabled=0;
+            assert(texture_pack_wide_bind_source(&device,0,1,(IDirect3DBaseTexture8 *)source));
+            assert(bound[0]!=(IDirect3DBaseTexture8 *)source && bound[0]!=side);
+            policy.id=third; policy.enabled=1;
+            assert(texture_pack_wide_bind_source(&device,0,1,(IDirect3DBaseTexture8 *)source));
+            assert(bound[0]!=(IDirect3DBaseTexture8 *)source); /* unrelated identities retain their slab */
+            before=policy.calls;
+            assert(!texture_pack_wide_bind_source(&device,4,0,(IDirect3DBaseTexture8 *)source));
+            assert(!texture_pack_wide_bind_source(&device,0,99,(IDirect3DBaseTexture8 *)source));
+            assert(!texture_pack_wide_bind_source(NULL,0,0,(IDirect3DBaseTexture8 *)source));
+            assert(policy.calls==before);
+            texture_pack_set_wide_replay_filter(NULL,NULL);
+            assert(texture_pack_wide_bind_source(&device,0,1,(IDirect3DBaseTexture8 *)source));
+            assert(bound[0]!=(IDirect3DBaseTexture8 *)source);
+            assert(texture_pack_wide_bind_source(&device,0,0,(IDirect3DBaseTexture8 *)source));
+            source->lpVtbl->Release(source);
+        }
         assert(texture_pack_wide_bind(&device,0,2)==0);
         slab=&g_entries[wide_anchor(0)->first+2]; assert(slab->failed);
         slab=&g_entries[wide_anchor(0)->first]; set_texture(&device,0,NULL); release_entry(&device,slab);
         g_sync_load=0; g_stage_id[0][0]=0;
         snprintf(path,sizeof path,"%s/wide/slabs/m4.png",root); remove_file(path);
+        snprintf(path,sizeof path,"%s/wide/slabs/in.png",root); remove_file(path);
         snprintf(path,sizeof path,"%s/wide/slabs/p4.png",root); remove_file(path);
         remove_file(manifest);
         snprintf(path,sizeof path,"%s/wide/slabs",root); remove_dir(path);
@@ -419,7 +462,9 @@ int main(void)
         for(spins=0;spins<2000 && upload_png_async(&device,&g_entries[0],&source,0)==-2;spins++) nap_ms(1);
         release_entry(&device,&g_entries[0]);
     }
+    texture_pack_set_wide_replay_filter(replay_source, NULL);
     texture_pack_shutdown(&device);
+    assert(!g_wide_replay_filter && !g_wide_replay_user);
 #if defined(_WIN32)
     CoUninitialize();
 #endif

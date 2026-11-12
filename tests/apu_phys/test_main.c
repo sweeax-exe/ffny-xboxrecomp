@@ -94,6 +94,8 @@ static void check_alias(uint32_t alias)
         return;
     }
     printf("apu_phys: alias 0x%08X, heap block at 0x%08X\n", alias, a);
+    check(alias >= XBOX_CONTIG_SIZE && alias + 0x04000000u <= 0x10000000u,
+          "heap names sit above the whole window, within 256 MB");
     xbox_ContiguousClaim(XBOX_CONTIG_BASE + a, 0x3000);
 
     for (w = a; w < a + 0x3000; w += 0x1000)

@@ -29,7 +29,10 @@
 #ifndef XBOX_CONTIG_BASE
 #define XBOX_CONTIG_BASE 0x80000000u   /* the contiguous window; kernel.h */
 #endif
-#define XBOX_CONTIG_WINDOW 0x04000000u  /* 64 MB of it */
+#ifndef XBOX_CONTIG_MB
+#define XBOX_CONTIG_MB 64
+#endif
+#define XBOX_CONTIG_WINDOW ((uint32_t)(XBOX_CONTIG_MB) << 20)  /* kernel.h's XBOX_CONTIG_SIZE */
 
 extern ptrdiff_t xbox_GetMemoryOffset(void);
 
@@ -188,7 +191,7 @@ void nv2a_pb_scan_report(void)
 /* Physical pushbuffer addresses (DMA_PUT/GET, JUMP and CALL targets) and the
  * contiguous window they index (upstream's DMA walk). */
 #define PB_PHYS_MASK 0x0FFFFFFCu
-#define PB_RAM_BYTES (64u * 1024u * 1024u)   /* XBOX_CONTIG_SIZE */
+#define PB_RAM_BYTES XBOX_CONTIG_WINDOW   /* XBOX_CONTIG_SIZE */
 #define PB_HIST 8
 static struct { uint32_t at, w; } s_hist[PB_HIST];
 static unsigned s_hist_n;

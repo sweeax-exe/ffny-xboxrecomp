@@ -6307,7 +6307,7 @@ static void peek_addresses(void)
          * second one, and skipping it silently made this print nothing
          * at all for an address that was perfectly readable. */
         if (!((va >= 0x1000u && va < 0x04000000u)
-           || (va >= 0x80000000u && va < 0x84000000u)))
+           || (va >= XBOX_CONTIG_BASE && va < XBOX_CONTIG_BASE + XBOX_CONTIG_SIZE)))
             continue;
         v = *(const uint32_t *)(mem + va);
         memcpy(&f, &v, 4);
@@ -6346,7 +6346,7 @@ static void peek_chain(void)
              * allocates contiguously live at 0x8xxxxxxx, and a chain that
              * stops at the first of those stops at most of them. */
             if (!((cur >= 0x1000u && cur + 4 < 0x04000000u)
-               || (cur >= 0x80000000u && cur + 4 < 0x84000000u))) {
+               || (cur >= XBOX_CONTIG_BASE && cur + 4 < XBOX_CONTIG_BASE + XBOX_CONTIG_SIZE))) {
                 fprintf(stderr, "  [CHAIN] step %d: 0x%08X is not a guest"
                                 " pointer -- chain ends\n", step, cur);
                 return;
@@ -6358,7 +6358,7 @@ static void peek_chain(void)
         step++;
     }
     if ((cur >= 0x1000u && cur + 4 < 0x04000000u)
-     || (cur >= 0x80000000u && cur + 4 < 0x84000000u))
+     || (cur >= XBOX_CONTIG_BASE && cur + 4 < XBOX_CONTIG_BASE + XBOX_CONTIG_SIZE))
         fprintf(stderr, "  [CHAIN] final value at 0x%08X = 0x%08X\n",
                 cur, *(const uint32_t *)(mem + cur));
     fflush(stderr);

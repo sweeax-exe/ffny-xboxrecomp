@@ -14,8 +14,11 @@ int main(void) {
     const uint32_t cases[][2]={
         {0,0},{0x1000,0x1000},{0x03ffffff,0x03ffffff},
         {0x7fffffff,0x7fffffff},{0x80000000,0},
-        {0x80001000,0x1000},{0x83ffffff,0x03ffffff},
-        {0x84000000,0x84000000},{0xffffffff,0xffffffff}
+        {0x80001000,0x1000},
+        /* the window's last byte and the first past it, whatever its size */
+        {XBOX_CONTIG_BASE+XBOX_CONTIG_SIZE-1u,XBOX_CONTIG_SIZE-1u},
+        {XBOX_CONTIG_BASE+XBOX_CONTIG_SIZE,XBOX_CONTIG_BASE+XBOX_CONTIG_SIZE},
+        {0xffffffff,0xffffffff}
     };
     uint8_t *memory=VirtualAlloc(NULL,16*1024*1024,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);
     if(!memory) return 10;

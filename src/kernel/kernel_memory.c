@@ -158,7 +158,10 @@ NTSTATUS __stdcall xbox_MmQueryStatistics(PXBOX_MM_STATISTICS MemoryStatistics)
      * allocators have handed out. The runtime's main-thread stack reservation is
      * its own artefact and is not counted. */
     {
-        enum { PAGE = 4096, TOTAL = 64 * 1024 * 1024, KERNEL = 2 * 1024 * 1024 };
+        /* TOTAL: the console's 64 MB unless the port reports more
+         * (XBOX_REPORTED_RAM_MB, kernel.h); the title's arena grows with it. */
+        enum { PAGE = 4096, KERNEL = 2 * 1024 * 1024 };
+        const uint64_t TOTAL = (uint64_t)XBOX_REPORTED_RAM_MB * 1024u * 1024u;
         static uint32_t image_size;
         static int logged;
         const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
@@ -171,7 +174,7 @@ NTSTATUS __stdcall xbox_MmQueryStatistics(PXBOX_MM_STATISTICS MemoryStatistics)
         }
         used = (uint64_t)KERNEL + image_size
              + xbox_HeapLiveBytes() + xbox_ContiguousLiveBytes();
-        MemoryStatistics->TotalPhysicalPages = TOTAL / PAGE;               /* 16384 */
+        MemoryStatistics->TotalPhysicalPages = (ULONG)(TOTAL / PAGE);      /* 16384 at 64 MB */
         MemoryStatistics->AvailablePages =
             used >= TOTAL ? 0 : (ULONG)((TOTAL - used) / PAGE);
         if (logged++ < 4)

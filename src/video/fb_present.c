@@ -40,6 +40,9 @@
 #include "keyboard.h"   /* src/input */
 #include "gpu_present.h"
 #include "recomp_exit_hook.h"   /* src/platform */
+#ifndef XBOX_CONTIG_MB
+#define XBOX_CONTIG_MB 64   /* kernel.h: the contiguous window's size */
+#endif
 #include <stdbool.h>
 #include "pvideo_scanout.h"
 #include "../nv2a/nv2a_mmio_hook.h"
@@ -99,7 +102,7 @@ static void fb_overlay(void)
         uint8_t *snapshot;
 
         if (!(regs[NV_PVIDEO_BUFFER / 4] & (1u << (bank * 4u)))) continue;
-        if (!bytes || physical + bytes > 0x04000000u) continue;
+        if (!bytes || physical + bytes > ((uint64_t)XBOX_CONTIG_MB << 20)) continue;   /* the window */
         va = (uintptr_t)(0x80000000u + (uint32_t)physical) +
              (uintptr_t)xbox_GetMemoryOffset();
         if (!VirtualQuery((const void *)va, &mapping, sizeof(mapping)) ||

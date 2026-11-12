@@ -113,6 +113,21 @@ static inline uint32_t apu_mapped_ram(void)
     return (uint32_t)(g_xbox_map_size ? g_xbox_map_size : g_xbox_total_ram);
 }
 
+/* The contiguous window's physical numbers: the console's 64 MB, or the
+ * larger window a port built (XBOX_CONTIG_MB, kernel.h). */
+#ifndef XBOX_CONTIG_MB
+#define XBOX_CONTIG_MB 64
+#endif
+#define APU_WINDOW_BYTES ((uint32_t)(XBOX_CONTIG_MB) << 20)
+
+/* How much RAM a heap name's alias covers: the RAM the host mapped, at most
+ * the 64 MB below the heap's top. */
+static inline uint32_t apu_ram_span(void)
+{
+    uint32_t r = (uint32_t)g_xbox_total_ram;
+    return r && r < (64u << 20) ? r : (64u << 20);
+}
+
 static uint8_t *apu_phys_classify(uint64_t addr)
 {
     uint32_t a = (uint32_t)addr & 0x0FFFFFFFu;
@@ -121,7 +136,7 @@ static uint8_t *apu_phys_classify(uint64_t addr)
      * (xbox_PhysRamName), so it is RAM whatever the window holds at the same
      * offset. Before the 64 MB case, which would read a 128 MB map's alias as
      * plain RAM. */
-    if (alias && a >= alias && a - alias < (64u << 20))
+    if (alias && a >= alias && a - alias < apu_ram_span())
         return g_apu_ram_ptr + (a - alias);
     /* RAM above the window's 64 MB. On a 128 MB layout (a devkit) most of
      * the heap sits above 0x04000000, and so do the sound buffers a title
@@ -132,7 +147,7 @@ static uint8_t *apu_phys_classify(uint64_t addr)
      * that lost its upper half each time its ring crossed the boundary.
      * There is no window up here, so it is RAM as far as the host mapped it;
      * only above that does the address wrap. */
-    if (a >= (64u << 20)) {
+    if (a >= APU_WINDOW_BYTES) {
         if (a < apu_mapped_ram())
             return g_apu_ram_ptr + a;
         return g_apu_ram_ptr + (a & 0x03FFFFFFu);
@@ -174,9 +189,9 @@ const char *mcpx_apu_phys_class(uint64_t addr)
 {
     uint32_t a = (uint32_t)addr & 0x0FFFFFFFu;
     uint32_t alias = xbox_PhysRamAlias();
-    if (alias && a >= alias && a - alias < (64u << 20))
+    if (alias && a >= alias && a - alias < apu_ram_span())
         return "named";
-    if (a >= (64u << 20))
+    if (a >= APU_WINDOW_BYTES)
         return a < apu_mapped_ram() ? "ram" : "wrap";
     if (xbox_PhysRamNamedAt(a))
         return "named";
@@ -226,7 +241,7 @@ uint8_t *mcpx_apu_phys(uint64_t addr)
      * entry or none: generation (24 bits, offset by one so a zeroed entry
      * never matches), physical page (20), guest page (20). */
     static volatile uint64_t cache[APU_PHYS_CACHE];
-    uint32_t pa = (uint32_t)addr & 0x03FFFFFFu;
+    uint32_t pa = (uint32_t)addr & (APU_WINDOW_BYTES > (64u << 20) ? 0x0FFFFFFFu : 0x03FFFFFFu);
     uint32_t pn = pa >> 12;
     uint64_t tag = ((uint64_t)((xbox_PhysMapGeneration() + 1) & 0xFFFFFFu) << 40)
                  | ((uint64_t)pn << 20);
@@ -238,8 +253,8 @@ uint8_t *mcpx_apu_phys(uint64_t addr)
 #endif
     uint32_t vn, va;
 
-    if (((uint32_t)addr & 0x0FFFFFFFu) >= (64u << 20))
-        return apu_phys_classify(addr);          /* above 64 MB: RAM, as upstream */
+    if (((uint32_t)addr & 0x0FFFFFFFu) >= APU_WINDOW_BYTES)
+        return apu_phys_classify(addr);          /* above the window: RAM, as upstream */
     /* What the classifier knows for certain comes first: a heap page the
      * title named (RAM) and a page the contiguous allocator holds now
      * (window). The record decides only where the classifier would guess. */

@@ -1371,7 +1371,7 @@ uint32_t xbox_Nv2aFenceWordVa(void)
             continue;
         get_ptr = *(volatile uint32_t *)((uintptr_t)(dev + g_fence_mirrors[i].get_ptr_off)
                                          + g_memory_offset);
-        if (get_ptr >= 0x80000000u && get_ptr - 0x80000000u <= 0x04000000u - 4u
+        if (get_ptr >= 0x80000000u && get_ptr - 0x80000000u <= XBOX_CONTIG_SIZE - 4u
                 && !(get_ptr & 3u) && fence_readable(get_ptr, 4))
             return get_ptr;
     }
@@ -5373,10 +5373,24 @@ uint32_t xbox_PhysRamAlias(void)
         alias = (e && e[0] == '0' && !e[1]) ? 0 : 1;
         if (alias)
             fprintf(stderr, "  Physical names: heap pages below 64 MB alias"
-                            " into the first RAM mirror\n");
+                            " into the RAM mirror above the window\n");
     }
-    return alias && g_mirror_views[0] && g_memory_size >= XBOX_CONTIG_SIZE &&
-           g_memory_size <= 2u * XBOX_CONTIG_SIZE ? (uint32_t)g_memory_size : 0;
+    if (!alias || !g_memory_size)
+        return 0;
+    /* The first RAM mirror at or above the window's top: the RAM size with
+     * the console's 64 MB window, a later mirror when the port built a larger
+     * window (XBOX_CONTIG_MB), so window numbers and heap names never meet.
+     * Within the 256 MB a title keeps of a physical address. */
+    {
+        uint64_t at = g_memory_size;
+        while (at < XBOX_CONTIG_SIZE)
+            at += g_memory_size;
+        if (at > 2u * (uint64_t)XBOX_CONTIG_SIZE || at + g_memory_size > 0x10000000u
+                || at / g_memory_size > XBOX_NUM_MIRRORS
+                || !g_mirror_views[at / g_memory_size - 1])
+            return 0;
+        return (uint32_t)at;
+    }
 }
 
 uint32_t xbox_PhysRamName(uint32_t va)

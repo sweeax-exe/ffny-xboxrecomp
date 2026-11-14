@@ -997,16 +997,37 @@ static ULONGLONG now_ms(void)
 }
 static int file_exists(const char *path) { return GetFileAttributesA(path)!=INVALID_FILE_ATTRIBUTES; }
 static void make_directories(const char *path) { SHCreateDirectoryExA(NULL,path,NULL); }
+/* Spans VirtualQuery found readable, remembered for READABLE_SPAN_MS per thread.
+ *
+ * VirtualQuery sizes the region it reports by walking the page table from the address to the
+ * point where the attributes change, so on a mapped view it costs about 2 us per MB between the
+ * address and the view's end. Every source revalidation asks here, and a port whose guest window
+ * is one large view (192 MB of contiguous memory) paid up to 350 us a call: a texture-heavy screen
+ * (Def Jam's Learn Moves preview, 600 draws a frame) spent most of the render thread in it and
+ * fell from 60 fps to 18 on four cores. Guest memory stays mapped for the run and a texture's
+ * pages never lose read access, so a span confirmed once is trusted for a short while. */
+#define READABLE_SPANS 8
+#define READABLE_SPAN_MS 500
+static __declspec(thread) struct { uintptr_t lo, hi; ULONGLONG at; } g_readable[READABLE_SPANS];
+static __declspec(thread) unsigned g_readable_next;
 static int memory_readable(const void *data,uint64_t bytes)
 {
     MEMORY_BASIC_INFORMATION region;
     uintptr_t begin=(uintptr_t)data,end=begin+(uintptr_t)bytes,at=begin,next;
+    ULONGLONG now=GetTickCount64();
+    unsigned i;
     if(end<begin) return 0;
+    for(i=0;i<READABLE_SPANS;i++)
+        if(begin>=g_readable[i].lo && end<=g_readable[i].hi && now-g_readable[i].at<READABLE_SPAN_MS) return 1;
     while(at<end) {
         if(!VirtualQuery((const void *)at,&region,sizeof region) || region.State!=MEM_COMMIT ||
            (region.Protect & (PAGE_NOACCESS|PAGE_GUARD))) return 0;
         next=(uintptr_t)region.BaseAddress+region.RegionSize;
         if(next<=at) return 0;
+        if(at==begin && next>=end) {           /* one region covers the span: remember it */
+            i=g_readable_next++%READABLE_SPANS;
+            g_readable[i].lo=(uintptr_t)region.BaseAddress; g_readable[i].hi=next; g_readable[i].at=now;
+        }
         at=next;
     }
     return 1;

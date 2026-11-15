@@ -1159,7 +1159,9 @@ void xbox_HostInputSetNetplayMulti(int enable, int local_slot, unsigned remote_m
 {
     LONG was = InterlockedExchange(&g_np_on, 0);
     remote_mask &= (1u << SLOTS) - 1u;
-    if (!enable || local_slot < 0 || local_slot >= SLOTS || !remote_mask || (remote_mask & (1u << local_slot))) {
+    /* local_slot -1: this PC's devices reach no slot (a spectator of a match that fills every slot) */
+    if (!enable || local_slot < -1 || local_slot >= SLOTS || !remote_mask ||
+        (local_slot >= 0 && (remote_mask & (1u << local_slot)))) {
         if (was) np_edges_restart();
         return;
     }

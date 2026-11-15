@@ -132,6 +132,18 @@ int main(void)
     CHECK(xbox_HostInputCurrentState(2,&state)==0 && !state.Gamepad.wButtons);
     xbox_HostInputSetNetplayFight(0);
     CHECK(xbox_HostInputPeekState(2,&state,&token)!=0);
+    /* A spectator of a match of four: no slot reads this PC's devices, every slot the agreed pad;
+     * GetLocalState still reads them (a spectator's START leaves the match) */
+    xbox_HostInputSetNetplayMulti(1,-1,15u,remote_pad);
+    CHECK(!xbox_HostInputConsumedEdges());
+    for (i=0;i<4;i++) {
+        CHECK(xbox_HostInputGetState((int)i,&state)==0 && state.dwPacketNumber==7);
+        CHECK(!state.Gamepad.bAnalogButtons[XBOX_BUTTON_X]);
+    }
+    CHECK(xbox_HostInputGetLocalState(&state)==0 && state.Gamepad.bAnalogButtons[XBOX_BUTTON_X]);
+    CHECK(xbox_HostInputRumble(0,1000,1000)==0);
+    xbox_HostInputSetNetplayMulti(1,-2,15u,remote_pad);     /* refused: netplay off */
+    CHECK(xbox_HostInputConsumedEdges());
     xbox_HostInputSetNetplay(0,0,0,NULL);
     CHECK(xbox_HostInputConsumedEdges());
     set_x(0,0);

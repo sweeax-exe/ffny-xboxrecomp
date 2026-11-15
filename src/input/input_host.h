@@ -162,7 +162,9 @@ void xbox_HostInputSetNetplay(int enable, int local_slot, int remote_slot,
                               DWORD (*remote)(XBOX_INPUT_STATE *state));
 
 /* Online play with more than one other player: this PC's player in `local_slot`, every slot in
- * `remote_mask` (bit n = slot n) reported by `remote` for that slot, every other slot empty. */
+ * `remote_mask` (bit n = slot n) reported by `remote` for that slot, every other slot empty.
+ * `local_slot` -1: no slot reads this PC's devices (a spectator of a match whose players fill every
+ * slot); xbox_HostInputGetLocalState still reads them, and rumble goes nowhere. */
 void xbox_HostInputSetNetplayMulti(int enable, int local_slot, unsigned remote_mask,
                                    DWORD (*remote)(int slot, XBOX_INPUT_STATE *state));
 

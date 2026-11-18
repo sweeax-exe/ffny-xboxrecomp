@@ -13,7 +13,7 @@ ctest --test-dir build/kernel-events -C Release --output-on-failure
 
 | Test | What it checks |
 |---|---|
-| `kernel_events_default` | Lazy shadow objects support kernel set/reset, single waits, WaitAny and WaitAll. Direct header writes do not signal an existing shadow. |
+| `kernel_events_default` | Lazy shadow objects support kernel set/reset, single waits, WaitAny and WaitAll. Direct header writes do not signal an existing shadow. Kernel set, reset and a synchronization wait keep the guest `SignalState` in step while the header still reads as an event; `xbox_KeEventResyncFromGuest` clears the stale signal of an event rebuilt at a reused address and keeps a set that already happened. |
 | `kernel_events_title_kevents` | `RECOMP_TITLE_KEVENTS=1`. The table below. |
 
 The opt-in mode additionally makes direct guest header writes authoritative:

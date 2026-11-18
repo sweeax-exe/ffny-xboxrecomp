@@ -901,6 +901,13 @@ NTSTATUS __stdcall xbox_NtReleaseMutant(HANDLE MutantHandle, PLONG PreviousCount
 LONG     __stdcall xbox_KeSetEvent(PVOID Event, LONG Increment, BOOLEAN Wait);
 NTSTATUS __stdcall xbox_KeWaitForSingleObject(PVOID Object, ULONG WaitReason, KPROCESSOR_MODE WaitMode, BOOLEAN Alertable, PLARGE_INTEGER Timeout);
 
+/* Before a title waits on a KEVENT it built itself (guest VA): reset the
+ * host shadow when the guest header's SignalState is 0. A shadow keyed by
+ * a reused stack address otherwise keeps the signal of the event that lived
+ * there before, and the wait returns at once (kernel_bridge.c). Returns 1
+ * when it reset the shadow. */
+int xbox_KeEventResyncFromGuest(uint32_t guest_va);
+
 /* The push-buffer executor reached a PGRAPH software method (a NOP with a
  * parameter); the kernel raises the notify interrupt for it (kernel_bridge.c). */
 void kernel_nv2a_software_method(uint32_t subch, uint32_t method, uint32_t data);

@@ -211,6 +211,35 @@ int main(int argc, char **argv)
             check(ke_wait(SYNC_VA) == STATUS_TIMEOUT && ke_wait(NOTIF_VA) == 0,
                   "default: multiple wait consumes only the synchronization event", NULL);
         }
+        {
+            /* The guest header follows the kernel calls, and a waiter can
+             * make the shadow honour it (xbox_KeEventResyncFromGuest): an
+             * event rebuilt on a reused stack slot must not inherit the
+             * signal of the one that lived there (a USB request's wait
+             * returned at once, and its completion wrote into a dead frame). */
+            uint32_t ev = scratch + 0x3800, sy = scratch + 0x3900;
+            build_event(ev, 0, 0);
+            ke_set(ev);
+            check(G(ev)[1] == 1, "default: KeSetEvent writes SignalState", NULL);
+            build_event(ev, 0, 0);          /* the next frame's event, same address */
+            check(ke_wait(ev) == 0, "default: a rebuilt event keeps the stale host signal", NULL);
+            check(xbox_KeEventResyncFromGuest(ev) == 1 && ke_wait(ev) == STATUS_TIMEOUT,
+                  "default: resync from the guest header clears the stale signal", NULL);
+            ke_set(ev);
+            check(xbox_KeEventResyncFromGuest(ev) == 0 && ke_wait(ev) == 0,
+                  "default: resync keeps a set that already happened", NULL);
+            ke_reset(ev);
+            check(G(ev)[1] == 0 && ke_wait(ev) == STATUS_TIMEOUT,
+                  "default: KeResetEvent clears SignalState", NULL);
+            build_event(sy, 1, 0);
+            ke_set(sy);
+            check(G(sy)[1] == 1 && ke_wait(sy) == 0 && G(sy)[1] == 0,
+                  "default: a synchronization wait consumes SignalState", NULL);
+            G(ev)[0] = 0x0027EC6Eu; G(ev)[1] = 0xCAFEF00Du;   /* the slot reused by other code */
+            ke_set(ev);
+            check(G(ev)[1] == 0xCAFEF00Du, "default: a late set leaves a reused slot alone", NULL);
+            check(xbox_KeEventResyncFromGuest(ev) == 0, "default: resync ignores a non-event header", NULL);
+        }
     } else {
         /* 1. Not set: times out. */
         st = ke_wait(SYNC_VA);

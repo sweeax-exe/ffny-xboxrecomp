@@ -2117,6 +2117,58 @@ static HANDLE ke_guest_event_prepare(uint32_t guest_va, int *type)
     return h;
 }
 
+/* A guest header that still reads as a KEVENT: Type 0 (notification) or 1
+ * (synchronization), Size 4 dwords, in RAM or the contiguous window. Its
+ * SignalState (+4) is the event's state as the title sees it. A lazy shadow
+ * outlives the object at its address (a stack frame that returned), so the
+ * header is checked again on every write rather than trusted from the first
+ * use. */
+static int ke_header_is_event(uint32_t guest_va, int *type)
+{
+    uint32_t hdr;
+    if (guest_va < 0x10000u || (guest_va & 3u))
+        return 0;
+    if (guest_va >= 0x04000000u && (guest_va < XBOX_CONTIG_BASE || guest_va >= XBOX_CONTIG_BASE + XBOX_CONTIG_SIZE))
+        return 0;
+    hdr = BRIDGE_MEM32(guest_va);
+    if (((hdr & 0xFFu) != 0 && (hdr & 0xFFu) != 1) || ((hdr >> 16) & 0xFFu) != 4)
+        return 0;
+    if (type)
+        *type = (int)(hdr & 0xFFu);
+    return 1;
+}
+
+/* Bring the host shadow of a title-built event in line with its guest
+ * SignalState, for a wait that must honour the guest header without
+ * RECOMP_TITLE_KEVENTS (which changes every wait in the title).
+ *
+ * Shadows are keyed by guest address and never reset, so an event rebuilt
+ * on a stack slot that held a signalled one starts out "set" on the host:
+ * the wait returns at once although the title wrote SignalState = 0. Called
+ * after the title has written the header and before it waits. KeSetEvent
+ * writes SignalState = 1 before it signals the host event, so a set that
+ * lands between the check and the reset is seen by the second read.
+ * Returns 1 when the host event was reset (the title's header said 0). */
+int xbox_KeEventResyncFromGuest(uint32_t guest_va)
+{
+    int type;
+    HANDLE h;
+
+    if (!ke_header_is_event(guest_va, &type))
+        return 0;
+    h = ke_object_resolve(guest_va);
+    if (!h || h == XBOX_TO_NATIVE(guest_va))
+        return 0;
+    if (BRIDGE_MEM32(guest_va + 4) != 0)
+        return 0;                       /* set: the host event already is */
+    ResetEvent(h);
+    if (BRIDGE_MEM32(guest_va + 4) != 0) { /* set meanwhile */
+        SetEvent(h);
+        return 0;
+    }
+    return 1;
+}
+
 /* RECOMP_KE_TRACE=<guest VA>: every set and wait on one dispatcher object,
  * with what the host shadow answered. A hang on an event is either "nobody
  * set it" or "it was set and something else happened", and the counters
@@ -2153,6 +2205,12 @@ static void bridge_KeSetEvent(void)
         }
     }
     h = ke_object_resolve(guest_va);
+    /* The guest SignalState too, as the kernel does, and before the host
+     * event: xbox_KeEventResyncFromGuest reads it to tell a set that has
+     * happened from a stale shadow. Only while the header still reads as an
+     * event: a late set on a stack slot reused since must not write there. */
+    if (h && h != XBOX_TO_NATIVE(guest_va) && ke_header_is_event(guest_va, NULL))
+        BRIDGE_MEM32(guest_va + 4) = 1;
     if (h)
         g_eax = (uint32_t)SetEvent(h);
     else
@@ -2194,6 +2252,12 @@ static void bridge_KeWaitForSingleObject(void)
     g_eax = (uint32_t)xbox_KeWaitForSingleObject(
         h, wait_reason, wait_mode,
         (BOOLEAN)alertable, XBOX_TO_NATIVE(timeout_ptr));
+    {   /* A synchronization event's wait consumes the SignalState KeSetEvent wrote. */
+        int type;
+        if (g_eax == 0 && h && h != XBOX_TO_NATIVE(object) &&
+            ke_header_is_event(object, &type) && type == 1)
+            BRIDGE_MEM32(object + 4) = 0;
+    }
     if (object && object == ke_trace_va())
         fprintf(stderr, "  [KE] ... wait 0x%08X returned 0x%08X\n", object, g_eax);
 }
@@ -9703,6 +9767,8 @@ static void bridge_KeResetEvent(void)
         }
     }
     h = ke_shadow_lookup(guest_va);
+    if (h && ke_header_is_event(guest_va, NULL))
+        BRIDGE_MEM32(guest_va + 4) = 0;     /* the guest header agrees (KeSetEvent wrote 1) */
     if (!h)
         h = XBOX_TO_NATIVE(guest_va);
     if (h)

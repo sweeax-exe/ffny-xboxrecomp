@@ -304,8 +304,9 @@ static void assign_device(int d)
             int pad_slot = H.kb_slot;
             H.kb_slot = free_slot;
             if (H.players < free_slot + 1) H.players = free_slot + 1;
-            log_line("[INPUT] keyboard and mouse move to player %d (a pad takes player %d)\n", free_slot + 1,
-                     pad_slot + 1);
+            fprintf(stderr, "[INPUT] keyboard and mouse move to player %d (a pad takes player %d)\n",
+                    free_slot + 1, pad_slot + 1);
+            fflush(stderr);
             if (g_need_players) g_need_players(free_slot + 1);
         }
     }

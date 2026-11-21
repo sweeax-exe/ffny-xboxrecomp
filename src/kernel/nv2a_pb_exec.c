@@ -4339,6 +4339,10 @@ static void bind_texture_ready(const Texture *t)
     }
 }
 
+/* The host's per-batch filter for GPU vertex-program draws (nv2a_pgraph_d3d11.h). */
+static nv2a_draw_filter_fn s_draw_filter;
+void nv2a_set_draw_filter(nv2a_draw_filter_fn fn) { s_draw_filter = fn; }
+
 /* Widescreen side extensions: [wide] slabs in a texture pack (texture_pack.c). A centred 2D
  * batch whose stage-0 source has slabs is drawn again once per slab -- the same vertices,
  * colours, combiners and blend, shifted dt source texels sideways and clipped to the side areas
@@ -5011,9 +5015,20 @@ static void draw_primitive_body(void)
                 {
                     LONGLONG et_d0 = s_et_on > 0 ? et_now() : 0;
                     if (n >= 3 && gpu) {
-                        pgraph_d3d11_set_point_mode(s_gpu.prim == 1, s_point_size);
-                        (void)pgraph_d3d11_draw_program(gv, gnv, used, gtri, gnt, gsu, gsv);
-                        pgraph_d3d11_set_point_mode(0, 0.0f);
+                        float fa = 1.0f;
+                        if (s_draw_filter && s_gpu.prim != 1) {      /* the host's occluder fade (visual only) */
+                            uint32_t cver;
+                            const float *cc = nv2a_vsh_constants(&cver);
+                            fa = s_draw_filter(gv, gnv, used, gtri, gnt, cc);
+                        }
+                        if (fa > 0.0f) {
+                            pgraph_d3d11_set_point_mode(s_gpu.prim == 1, s_point_size);
+                            if (fa < 1.0f)
+                                pgraph_d3d11_set_fade(fa);
+                            (void)pgraph_d3d11_draw_program(gv, gnv, used, gtri, gnt, gsu, gsv);
+                            pgraph_d3d11_set_fade(1.0f);
+                            pgraph_d3d11_set_point_mode(0, 0.0f);
+                        }
                     }
                     else if (n >= 3)
                         pgraph_d3d11_draw_ready(s_gpu.prim, ready, n);

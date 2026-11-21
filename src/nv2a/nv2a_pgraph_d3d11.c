@@ -1472,6 +1472,9 @@ static PgraphReadyVertex *clip_batch_w(uint32_t mode, const PgraphReadyVertex *v
  * alpha test and colour mask, no culling, the pre-transformed vertex format
  * (which also picks the pixel shader). Returns 0 when the batch writes
  * nothing and is skipped. */
+static float s_fade = 1.0f;
+void pgraph_d3d11_set_fade(float alpha) { s_fade = alpha; }
+
 static int ready_state(IDirect3DDevice8 *dev, float *zscale)
 {
     int use_depth;
@@ -1545,6 +1548,18 @@ static int ready_state(IDirect3DDevice8 *dev, float *zscale)
             dev->lpVtbl->SetRenderState(dev, D3DRS_ALPHAREF, g_pg.alpha_ref);
             dev->lpVtbl->SetRenderState(dev, D3DRS_ALPHAFUNC, nv2a_cmp_to_d3d(g_pg.alpha_func));
         }
+    }
+    if (s_fade < 1.0f) {
+        /* Occluder fade: constant-alpha blend, no depth write, no alpha test. */
+        extern void d3d8_SetBlendColor(DWORD argb);
+        int a = (int)(s_fade * 255.0f + 0.5f);
+        dev->lpVtbl->SetRenderState(dev, D3DRS_ALPHABLENDENABLE, TRUE);
+        dev->lpVtbl->SetRenderState(dev, D3DRS_SRCBLEND, D3DBLEND_CONSTANTALPHA);
+        dev->lpVtbl->SetRenderState(dev, D3DRS_DESTBLEND, D3DBLEND_INVCONSTANTALPHA);
+        dev->lpVtbl->SetRenderState(dev, D3DRS_BLENDOP, nv2a_blend_eq_to_d3d(0x8006));
+        d3d8_SetBlendColor((DWORD)((a < 0 ? 0 : a > 255 ? 255 : a) << 24));
+        dev->lpVtbl->SetRenderState(dev, D3DRS_ALPHATESTENABLE, FALSE);
+        dev->lpVtbl->SetRenderState(dev, D3DRS_ZWRITEENABLE, FALSE);
     }
     dev->lpVtbl->SetVertexShader(dev, D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1);
 

@@ -130,6 +130,17 @@ void pgraph_d3d11_set_surface_clip(uint32_t x, uint32_t y, uint32_t w, uint32_t 
 void pgraph_d3d11_set_point_mode(int on, float size);
 /* Widescreen: clip-space x of the next draws becomes x * kx + bx (1, 0 = unchanged). */
 void pgraph_d3d11_set_placement(float kx, float bx);
+/* Occluder fade (visual only): the next draws blend into what is behind them at `alpha`
+ * (1 = off, the title's own blend state), with depth writes off so what stands behind
+ * them still draws. Reset to 1 after the draw. */
+void pgraph_d3d11_set_fade(float alpha);
+/* A host filter for the GPU vertex-program batches of the push-buffer executor (nv2a_pb_exec.c).
+ * Given the batch's packed vertices (one float4 per input in `used`, a triangle list of `nidx` indices into them)
+ * and the vertex-program constants it returns the alpha to draw with: 1 = as the title asked,
+ * 0 or less = leave the batch out. NULL (the default) = no filter. */
+typedef float (*nv2a_draw_filter_fn)(const float *verts, uint32_t nverts, uint32_t used,
+                                     const uint16_t *idx, uint32_t nidx, const float *consts);
+void nv2a_set_draw_filter(nv2a_draw_filter_fn fn);
 /* Widescreen 2D placement policy (nv2a_pb_exec.c): k = title aspect / canvas aspect
  * (1 = off); hud_reach = how far towards the screen edge anchored HUD pieces go
  * (1 = the edge). The heartbeat, once per game tick, says a fight HUD is up. */

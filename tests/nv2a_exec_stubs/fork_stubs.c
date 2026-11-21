@@ -60,6 +60,7 @@ int pgraph_d3d11_set_texture_ready_mips(uint32_t guest_addr, const void *data, u
 void pgraph_d3d11_set_combiner_state(const Nv2aCombiner *state) { (void)state; }
 void pgraph_d3d11_set_placement(float kx, float bx) { (void)kx; (void)bx; }
 void pgraph_d3d11_set_point_mode(int on, float size) { (void)on; (void)size; }
+void pgraph_d3d11_set_fade(float alpha) { (void)alpha; }
 #ifndef NV2A_HOST_CLIP_TEST
 void pgraph_d3d11_set_surface_clip(uint32_t x, uint32_t y, uint32_t w, uint32_t h)
 { (void)x; (void)y; (void)w; (void)h; }

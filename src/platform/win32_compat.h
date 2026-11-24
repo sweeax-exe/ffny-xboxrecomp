@@ -121,6 +121,8 @@ VOID AcquireSRWLockShared(PSRWLOCK lock);
 VOID ReleaseSRWLockShared(PSRWLOCK lock);
 VOID AcquireSRWLockExclusive(PSRWLOCK lock);
 VOID ReleaseSRWLockExclusive(PSRWLOCK lock);
+BOOLEAN TryAcquireSRWLockShared(PSRWLOCK lock);
+BOOLEAN TryAcquireSRWLockExclusive(PSRWLOCK lock);
 
 /* ---- One-time initialisation ------------------------------------------- */
 BOOL InitOnceExecuteOnce(PINIT_ONCE once, PINIT_ONCE_FN fn, PVOID param, PVOID *context);

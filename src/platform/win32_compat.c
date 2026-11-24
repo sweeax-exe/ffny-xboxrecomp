@@ -920,6 +920,9 @@ VOID AcquireSRWLockShared(PSRWLOCK lock)     { pthread_rwlock_rdlock(srw_lazy_in
 VOID ReleaseSRWLockShared(PSRWLOCK lock)     { pthread_rwlock_unlock(srw_lazy_init(lock)); }
 VOID AcquireSRWLockExclusive(PSRWLOCK lock)  { pthread_rwlock_wrlock(srw_lazy_init(lock)); }
 VOID ReleaseSRWLockExclusive(PSRWLOCK lock)  { pthread_rwlock_unlock(srw_lazy_init(lock)); }
+/* Win32: nonzero when the lock was taken without waiting. */
+BOOLEAN TryAcquireSRWLockShared(PSRWLOCK lock)    { return pthread_rwlock_tryrdlock(srw_lazy_init(lock)) == 0; }
+BOOLEAN TryAcquireSRWLockExclusive(PSRWLOCK lock) { return pthread_rwlock_trywrlock(srw_lazy_init(lock)) == 0; }
 
 /* ===================================================================== */
 /* One-time initialisation                                               */

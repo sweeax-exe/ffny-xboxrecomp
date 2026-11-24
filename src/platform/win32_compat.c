@@ -2562,6 +2562,18 @@ BOOL GetFileSizeEx(HANDLE h, PLARGE_INTEGER size)
     return TRUE;
 }
 
+BOOL SetFilePointerEx(HANDLE h, LARGE_INTEGER distance, PLARGE_INTEGER new_pos, DWORD method)
+{
+    int fd = w32_handle_fd(h);
+    int whence = method == FILE_END ? SEEK_END : method == FILE_CURRENT ? SEEK_CUR : SEEK_SET;
+    off_t at;
+    if (fd < 0) { SetLastError(ERROR_INVALID_HANDLE); return FALSE; }
+    at = lseek(fd, (off_t)distance.QuadPart, whence);
+    if (at < 0) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+    if (new_pos) new_pos->QuadPart = (LONGLONG)at;
+    return TRUE;
+}
+
 BOOL FlushFileBuffers(HANDLE h)
 {
     int fd = w32_handle_fd(h);

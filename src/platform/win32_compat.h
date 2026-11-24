@@ -292,6 +292,12 @@ BOOL   ReadFile(HANDLE h, LPVOID buf, DWORD len, LPDWORD nread, void *overlapped
 BOOL   WriteFile(HANDLE h, LPCVOID buf, DWORD len, LPDWORD nwritten, void *overlapped);
 DWORD  GetFileSize(HANDLE h, LPDWORD high);
 BOOL   GetFileSizeEx(HANDLE h, PLARGE_INTEGER size);
+#ifndef FILE_BEGIN
+#define FILE_BEGIN   0
+#define FILE_CURRENT 1
+#define FILE_END     2
+#endif
+BOOL   SetFilePointerEx(HANDLE h, LARGE_INTEGER distance, PLARGE_INTEGER new_pos, DWORD method);
 BOOL   FlushFileBuffers(HANDLE h);
 
 /* ---- Keyboard + window helpers (stubs on POSIX) --------------------- */
